@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>校园多智能体协同规划平台</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+<div class="app">
+  <!-- 顶部 -->
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">🎓</span>
+      <div>
+        <h1>校园多智能体综合协同规划平台</h1>
+        <p>多 Agent 博弈协商 · 三级记忆 · CoT 拆解 · 经验自进化</p>
+      </div>
+    </div>
+    <nav class="tabs">
+      <button class="tab active" data-tab="plan">智能规划</button>
+      <button class="tab" data-tab="dashboard">数据看板</button>
+      <button class="tab" data-tab="history">规划存档</button>
+      <button class="tab" data-tab="mydata" id="myDataTab">个人数据</button>
+      <button class="tab" data-tab="admin" id="adminTab" style="display:none">用户审核</button>
+      <button class="tab ghost" id="policyBtn">政策问答</button>
+      <span class="auth-area" id="authArea">
+        <button class="tab ghost" id="loginBtn">登录 / 注册</button>
+      </span>
+    </nav>
+  </header>
+
+  <!-- 规划页 -->
+  <section class="page active" id="page-plan">
+    <div class="grid">
+      <!-- 左：输入 -->
+      <div class="card input-card">
+        <h2>① 输入复合规划需求</h2>
+        <label>选择学生</label>
+        <select id="studentSel">
+          {% for s in students %}<option value="{{s.id}}">{{s.name}}（{{s.id}}）</option>{% endfor %}
+        </select>
+        <label>自然语言需求（支持多约束）</label>
+        <textarea id="reqInput" rows="4" placeholder="例如：期末冲刺高数，预算每月吃饭1000，想要环境好的自习室，不能违反宿舍熄灯规定"></textarea>
+        <div class="examples">
+          <span>示例：</span>
+          <a class="chip" data-ex="期末冲刺高数和数据结构，预算每月吃饭1000元，想要环境好的自习室，不能违反宿舍熄灯规定">高数冲刺+预算+环境+校规</a>
+          <a class="chip" data-ex="常规复习英语，生活费每月800，自习室安静就行">英语常规+省钱</a>
+        </div>
+        <button class="primary" id="runBtn">🚀 启动多智能体博弈规划</button>
+        <div class="agents-legend">
+          <div><i class="dot a"></i>学业风险</div>
+          <div><i class="dot b"></i>自习环境</div>
+          <div><i class="dot c"></i>后勤消费</div>
+          <div><i class="dot d"></i>政策合规</div>
+        </div>
+      </div>
+
+      <!-- 右：CoT + 博弈过程 -->
+      <div class="card flow-card">
+        <h2>② 博弈协商全过程</h2>
+        <div id="flowEmpty" class="empty">等待发起规划…左侧输入需求并点击启动。</div>
+        <div id="flow" class="flow hidden"></div>
+      </div>
+    </div>
+
+    <!-- 最终方案 + 图表 -->
+    <div id="resultArea" class="hidden">
+      <div class="card">
+        <h2>③ 全局均衡规划方案</h2>
+        <div class="result-grid" id="finalPlan"></div>
+      </div>
+      <div class="grid charts">
+        <div class="card"><h3>📅 周学习自习甘特图</h3><canvas id="ganttChart"></canvas></div>
+        <div class="card"><h3>💰 月度消费结构</h3><canvas id="consumeChart"></canvas></div>
+        <div class="card"><h3>🌡 自习室环境舒适度曲线</h3><canvas id="envChart"></canvas></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 看板页 -->
+  <section class="page" id="page-dashboard">
+    <div class="kpis" id="kpis"></div>
+    <div class="grid charts">
+      <div class="card"><h3>📉 全校学业风险排行（均分升序）</h3><canvas id="riskRankChart"></canvas></div>
+      <div class="card"><h3>🏫 自习室各时段平均 CO₂/人流</h3><canvas id="envHourChart"></canvas></div>
+      <div class="card"><h3>🍚 人均月度消费</h3><canvas id="consumeRankChart"></canvas></div>
+    </div>
+  </section>
+
+  <!-- 存档页 -->
+  <section class="page" id="page-history">
+    <div class="card">
+      <h2>历史规划方案存档</h2>
+      <div id="historyList" class="history-list"></div>
+    </div>
+  </section>
+
+  <!-- 个人数据中心 -->
+  <section class="page" id="page-mydata">
+    <div class="grid">
+      <!-- 录入 -->
+      <div class="card">
+        <h2>📥 数据录入</h2>
+        <div class="sub-tabs">
+          <button class="sub-tab active" data-form="grade">录入成绩</button>
+          <button class="sub-tab" data-form="consumption">录入消费</button>
+          <button class="sub-tab" data-form="import">CSV 批量导入</button>
+        </div>
+
+        <div class="entry-form active" id="form-grade">
+          <label>科目</label><input id="g_subject" placeholder="如：高等数学">
+          <div class="form-row">
+            <div><label>成绩(0-100)</label><input id="g_score" type="number" value="80"></div>
+            <div><label>出勤率(0-1)</label><input id="g_attendance" type="number" step="0.05" value="0.95"></div>
+          </div>
+          <div class="form-row">
+            <div><label>难度(0-1)</label><input id="g_difficulty" type="number" step="0.05" value="0.6"></div>
+            <div><label>学分</label><input id="g_credit" type="number" value="3"></div>
+          </div>
+          <label class="check"><input type="checkbox" id="g_failed"> 标记为挂科</label>
+          <button class="primary" id="saveGrade">保存成绩</button>
+        </div>
+
+        <div class="entry-form" id="form-consumption">
+          <label>消费项目</label><input id="c_item" placeholder="如：黄焖鸡米饭">
+          <div class="form-row">
+            <div><label>类别</label>
+              <select id="c_category"><option value="食堂">食堂</option><option value="水电">水电</option></select></div>
+            <div><label>第几天(1-30)</label><input id="c_day" type="number" value="1"></div>
+          </div>
+          <label>金额(元)</label><input id="c_amount" type="number" step="0.5" value="10">
+          <button class="primary" id="saveConsume">保存消费</button>
+        </div>
+
+        <div class="entry-form" id="form-import">
+          <label>目标数据表</label>
+          <select id="i_table"><option value="grades">成绩 grades</option><option value="consumption">消费 consumption</option></select>
+          <label>选择 CSV 文件</label>
+          <input id="i_file" type="file" accept=".csv">
+          <p class="hint">成绩列：subject,score,attendance,failed,difficulty,credit,exam_label,term_index,exam_week<br>
+            消费列：day,category,item,amount（自动归属到当前账号）</p>
+          <button class="primary" id="importCsv">上传并导入</button>
+        </div>
+      </div>
+
+      <!-- 我的数据 -->
+      <div class="card">
+        <h2>📊 我的数据明细</h2>
+        <div id="myDataEmpty" class="empty">登录后查看并管理你的成绩与消费数据。</div>
+        <div id="myDataBody" class="hidden">
+          <h3>成绩记录</h3>
+          <div class="table-wrap"><table id="gradeTable"></table></div>
+          <h3 style="margin-top:16px">消费记录</h3>
+          <div class="table-wrap"><table id="consumeTable"></table></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 用户审核（管理员） -->
+  <section class="page" id="page-admin">
+    <div class="card">
+      <h2>👥 用户注册审核</h2>
+      <div class="filter-bar">
+        <button class="sub-tab active" data-ustatus="">全部</button>
+        <button class="sub-tab" data-ustatus="pending">待审核</button>
+        <button class="sub-tab" data-ustatus="active">已通过</button>
+        <button class="sub-tab" data-ustatus="rejected">已驳回</button>
+      </div>
+      <div class="table-wrap"><table id="userTable"></table></div>
+    </div>
+  </section>
+</div>
+
+<!-- 政策问答弹窗 -->
+<div class="modal hidden" id="policyModal">
+  <div class="modal-box">
+    <div class="modal-head"><h3>🏛 校园政策问答</h3><span class="close" id="policyClose">✕</span></div>
+    <input id="policyInput" placeholder="如：奖学金成绩门槛是多少？自习室几点关闭？">
+    <button class="primary" id="policyAsk">检索</button>
+    <div id="policyAnswer" class="policy-answer"></div>
+  </div>
+</div>
+
+<!-- 登录 / 注册弹窗 -->
+<div class="modal hidden" id="authModal">
+  <div class="modal-box">
+    <div class="modal-head"><h3 id="authTitle">🔐 登录</h3><span class="close" id="authClose">✕</span></div>
+    <div class="sub-tabs">
+      <button class="sub-tab active" id="tabLogin">登录</button>
+      <button class="sub-tab" id="tabRegister">注册</button>
+    </div>
+    <label>学号</label><input id="auth_sid" placeholder="如：2021001 或 admin">
+    <div id="regName" class="hidden"><label>姓名</label><input id="auth_name" placeholder="真实姓名"></div>
+    <label>密码</label><input id="auth_pwd" type="password" placeholder="至少 6 位">
+    <button class="primary" id="authSubmit">登录</button>
+    <p class="hint" id="authHint">默认管理员账号：admin / admin123。新注册学生需管理员审核通过后方可登录。</p>
+    <div id="authMsg" class="auth-msg"></div>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
