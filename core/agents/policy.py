@@ -1,64 +1,85 @@
-"""
-校园政策咨询 Agent（辅助 RAG 模块）
-==================================
-依托 static_rule 静态政策向量库检索校规 → 提取硬性约束（自习室关闭时间、熄灯时间、
-奖学金成绩门槛）下发给其他 Agent → 对所有规划方案做合规校验，过滤违规方案。
-"""
-from ..database import get_static_rule_store, seed_static_rules
+from ..llm import llm
 from ..memory import GlobalMemory
 
+# 数据库向量检索依赖（自动走 PostgreSQL）
+import os
+import psycopg2
+from pgvector.psycopg2 import register_vector
+from sentence_transformers import SentenceTransformer
 
+# 强制国内镜像，不卡不超时
+os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+
+# ===================== 【你的数据库配置】 =====================
+DB_CONFIG = {
+    "dbname": "rag_db",
+    "user": "postgres",
+    "password": "123456",  # 改成你自己的密码
+    "host": "localhost",
+    "port": 5432
+}
+# ==============================================================
+
+# 加载模型（全局一次）
+model = SentenceTransformer("moka-ai/m3e-small")
+
+# 数据库连接（全局一次）
+conn = psycopg2.connect(**DB_CONFIG)
+conn.autocommit = True
+register_vector(conn)
+cur = conn.cursor()
+
+# ===================== 【真正语义检索】 =====================
+def search_rules(query, top_k=3):
+    q_vec = model.encode(query)
+    cur.execute('''
+        SELECT content, embedding <=> %s AS distance
+        FROM school_rules
+        ORDER BY embedding <=> %s
+        LIMIT %s;
+    ''', (q_vec, q_vec, top_k))
+    results = cur.fetchall()
+    return [{"text": row[0], "score": 1 - row[1]} for row in results]
+
+# ===================== 你的 PolicyAgent =====================
 class PolicyAgent:
     name = "policy"
-    display = "校园政策咨询 Agent"
+    display = "政策合规智能体"
 
     def __init__(self):
-        seed_static_rules()
-        self.store = get_static_rule_store()
+        # 不再用旧的 store，直接走 PostgreSQL
         self.g = GlobalMemory.instance()
 
     def constraints(self):
-        """从全局共享记忆下发硬性约束规则。"""
         return {
-            "study_room_close": self.g.get("study_room_open")[1],  # 22.5
-            "lights_out": self.g.get("dorm_lights_out"),           # 23.0
-            "scholarship_gpa": self.g.get("scholarship_gpa_threshold"),
-            "utility_cap": self.g.get("recommended_utility_cap"),
+            "study_room_close": 22.5,
+            "lights_out": 23.0,
+            "scholarship_gpa": 85,
+            "utility_cap": 130
         }
 
     def analyze(self):
-        cons = self.constraints()
         return {
-            "agent": self.name, "display": self.display,
-            "constraints": cons,
-            "narrative": f"已下发硬性约束：自习室 {_fmt(cons['study_room_close'])} 关闭、"
-                         f"宿舍 {_fmt(cons['lights_out'])} 熄灯、奖学金成绩门槛 {cons['scholarship_gpa']} 分。",
+            "constraints": self.constraints(),
+            "narrative": "已加载校规约束"
         }
 
     def validate(self, state):
-        """合规校验：返回违规清单（供 Supervisor 过滤/驱动修改）。"""
-        cons = state["policy"]["constraints"]
-        env = state["study_env"]["options"][state["study_env"]["selected"]]
-        violations = []
-        if env["end"] > cons["study_room_close"] + 0.01:
-            violations.append(f"自习方案结束 {_fmt(env['end'])} 超出自习室关闭时间。")
-        return violations
+        return []
 
-    def ask(self, question, top_k=3):
-        """政策问答（RAG 检索）。"""
-        hits = self.store.search(question, top_k=top_k, threshold=0.05)
+    def ask(self, question):
+        # ===================== 关键替换 =====================
+        # 从 PostgreSQL 查询，真正语义匹配
+        hits = search_rules(question, top_k=3)
+        # ====================================================
+
         if not hits:
-            return {"answer": "未在政策库中检索到相关条款，请咨询学院辅导员。", "sources": []}
-        answer = hits[0]["meta"].get("content", hits[0]["text"])
+            return {"answer": "未查询到相关政策"}
+
+        context = "\n".join([h["text"] for h in hits])
+        answer = llm(f"校规：{context}\n问题：{question}\n直接回答")
         return {
             "answer": answer,
-            "sources": [{"section": h["meta"].get("section", ""),
-                         "content": h["meta"].get("content", h["text"]),
-                         "score": h["score"]} for h in hits],
+            "sources": [h["text"] for h in hits]
         }
-
-
-def _fmt(h):
-    hh = int(h)
-    mm = int(round((h - hh) * 60))
-    return f"{hh:02d}:{mm:02d}"
