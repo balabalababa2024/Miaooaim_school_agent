@@ -6,6 +6,11 @@
 <title>校园多智能体协同规划平台</title>
 <link rel="stylesheet" href="/static/style.css">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+
+<!-- 强制不缓存，保证永远拿最新数据 -->
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 </head>
 <body>
 <div class="app">
@@ -38,9 +43,12 @@
       <div class="card input-card">
         <h2>① 输入复合规划需求</h2>
         <label>选择学生</label>
+        
+        <!-- 这里我改了：不再写死，由JS从数据库加载 -->
         <select id="studentSel">
-          {% for s in students %}<option value="{{s.id}}">{{s.name}}（{{s.id}}）</option>{% endfor %}
+          <option value="">加载中...</option>
         </select>
+
         <label>自然语言需求（支持多约束）</label>
         <textarea id="reqInput" rows="4" placeholder="例如：期末冲刺高数，预算每月吃饭1000，想要环境好的自习室，不能违反宿舍熄灯规定"></textarea>
         <div class="examples">
