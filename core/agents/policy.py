@@ -1,82 +1,56 @@
 from ..llm import llm
 from ..memory import GlobalMemory
+from ..database import get_static_rule_store
 
-# 数据库向量检索依赖（自动走 PostgreSQL）
-import os
-import psycopg2
-from pgvector.psycopg2 import register_vector
-from sentence_transformers import SentenceTransformer
-
-# 强制国内镜像，不卡不超时
-os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
-
-# ===================== 【你的数据库配置】 =====================
-DB_CONFIG = {
-    "dbname": "rag_db",
-    "user": "postgres",
-    "password": "123456",  # 改成你自己的密码
-    "host": "localhost",
-    "port": 5432
-}
-# ==============================================================
-
-# 加载模型（全局一次）
-model = SentenceTransformer("moka-ai/m3e-small")
-
-# 数据库连接（全局一次）
-conn = psycopg2.connect(**DB_CONFIG)
-conn.autocommit = True
-register_vector(conn)
-cur = conn.cursor()
-
-# ===================== 【真正语义检索】 =====================
-def search_rules(query, top_k=3):
-    q_vec = model.encode(query)
-    cur.execute('''
-        SELECT content, embedding <=> %s AS distance
-        FROM school_rules
-        ORDER BY embedding <=> %s
-        LIMIT %s;
-    ''', (q_vec, q_vec, top_k))
-    results = cur.fetchall()
-    return [{"text": row[0], "score": 1 - row[1]} for row in results]
-
-# ===================== 你的 PolicyAgent =====================
 class PolicyAgent:
     name = "policy"
     display = "政策合规智能体"
+    priority = 1
 
     def __init__(self):
-        # 不再用旧的 store，直接走 PostgreSQL
         self.g = GlobalMemory.instance()
+        self.rule_store = get_static_rule_store()
 
-    def constraints(self):
+    def get_constraints(self):
         return {
             "study_room_close": 22.5,
             "lights_out": 23.0,
             "scholarship_gpa": 85,
-            "utility_cap": 130
+            "monthly_utility_cap": 150,
+            "max_daily_study": 12.0,
+            "min_daily_study": 1.0
         }
 
     def analyze(self):
         return {
-            "constraints": self.constraints(),
-            "narrative": "已加载校规约束"
+            "agent": self.name,
+            "constraints": self.get_constraints(),
+            "narrative": "已加载校园政策与硬约束"
         }
 
-    def validate(self, state):
-        return []
+    def validate(self, academic_state, logistics_state, env_state):
+        rules = self.get_constraints()
+        conflicts = []
+        if env_state and "options" in env_state:
+            end = env_state["options"][0]["end"]
+            if end > rules["study_room_close"]:
+                conflicts.append({
+                    "agent": "study_env", "level": "HIGH",
+                    "msg": f"自习结束时间 {end} 超过闭馆时间 22:30"
+                })
+        if academic_state:
+            h = academic_state["options"][0]["daily_hours"]
+            if h > rules["max_daily_study"]:
+                conflicts.append({
+                    "agent": "academic", "level": "MID",
+                    "msg": f"学习时长 {h} 小时过长，建议≤12小时"
+                })
+        return conflicts
 
     def ask(self, question):
-        # ===================== 关键替换 =====================
-        # 从 PostgreSQL 查询，真正语义匹配
-        hits = search_rules(question, top_k=3)
-        # ====================================================
-
+        hits = self.rule_store.search(question, top_k=3)
         if not hits:
-            return {"answer": "未查询到相关政策"}
-
+            return {"answer": "未查询到相关校规"}
         context = "\n".join([h["text"] for h in hits])
         answer = llm(f"校规：{context}\n问题：{question}\n直接回答")
         return {

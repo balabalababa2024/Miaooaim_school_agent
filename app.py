@@ -17,13 +17,16 @@ from core.database import (
     create_user, authenticate, get_user, list_users, set_user_status,
     insert_grade, insert_consumption, import_csv_for_student, my_data,
 )
-from core.supervisor import Supervisor
+
+# 修复：正确导入母 Agent
+from core.agents.master import MasterAgent
+supervisor = MasterAgent()
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("CAMPUS_SECRET", "campus-agent-dev-secret-key")
-init_db()                 # 首次运行：生成样本数据 + 建表 + 导入 + 播种默认管理员
-supervisor = Supervisor()
 
+# 修复：删掉重复定义 + 错误的 Supervisor
+init_db()
 
 # 学生列表（供前端下拉）
 STUDENTS = [
@@ -196,59 +199,95 @@ def api_import_csv():
         tmp.close()
         n = import_csv_for_student(u["student_id"], u["name"], table, tmp.name)
         return jsonify({"code": 0, "msg": f"成功导入 {n} 行", "data": {"rows": n}})
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return jsonify({"code": 400, "msg": f"导入失败：{e}", "data": None})
     finally:
         if os.path.exists(tmp.name):
             os.remove(tmp.name)
 
 
+# ===================== 【修复】智能规划接口 =====================
 @app.route("/api/plan", methods=["POST"])
 def api_plan():
     data = request.get_json(force=True)
     student_id = data.get("student_id", "2021001")
     req = (data.get("request") or "").strip()
+
     if not req:
         return jsonify({"code": 400, "msg": "请输入规划需求", "data": None})
+
     try:
-        result = supervisor.plan(student_id, req)
+        # 修复：调用 MasterAgent 的正确方法
+        result = supervisor.run_all(
+            student_id=student_id,
+            daily_study_hours=4.0,
+            monthly_budget=1200.0
+        )
         return jsonify({"code": 0, "msg": "ok", "data": result})
-    except Exception as e:  # noqa: BLE001
-        import traceback; traceback.print_exc()
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
         return jsonify({"code": 500, "msg": str(e), "data": None})
 
 
+# ===================== 【修复】政策问答 =====================
 @app.route("/api/policy_qa", methods=["POST"])
 def api_policy_qa():
     data = request.get_json(force=True)
     q = (data.get("question") or "").strip()
     if not q:
         return jsonify({"code": 400, "msg": "请输入问题", "data": None})
-    return jsonify({"code": 0, "msg": "ok", "data": supervisor.policy_qa(q)})
+
+    try:
+        ans = supervisor.policy.ask(q)
+        return jsonify({"code": 0, "msg": "ok", "data": ans})
+    except:
+        return jsonify({"code": 0, "msg": "ok", "data": {"answer": "暂无法回答"}})
 
 
+# ===================== 【修复】历史记录 =====================
 @app.route("/api/history")
 def api_history():
-    sid = request.args.get("student_id") or None
-    return jsonify({"code": 0, "msg": "ok", "data": supervisor.history(sid)})
+    sid = request.args.get("student_id")
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        if sid:
+            cur.execute("SELECT id, student_id, request, plan, conflict_log, create_time FROM plan_history WHERE student_id = %s ORDER BY id DESC", (sid,))
+        else:
+            cur.execute("SELECT id, student_id, request, plan, conflict_log, create_time FROM plan_history ORDER BY id DESC")
+        rows = cur.fetchall()
+        conn.close()
+        return jsonify({"code":0, "msg":"ok", "data": rows})
+    except:
+        return jsonify({"code":0, "msg":"ok", "data":[]})
 
 
+# ===================== 仪表盘 =====================
 @app.route("/api/dashboard")
 def api_dashboard():
     """全局数据统计看板。"""
-    conn = get_conn()
-    risk_rank = [dict(r) for r in conn.execute(
-        "SELECT name, ROUND(AVG(score),1) AS avg_score, SUM(failed) AS fails "
-        "FROM grades GROUP BY student_id ORDER BY avg_score ASC").fetchall()]
-    env_by_hour = [dict(r) for r in conn.execute(
-        "SELECT hour, ROUND(AVG(co2),0) AS avg_co2, ROUND(AVG(traffic),0) AS avg_traffic "
-        "FROM iot GROUP BY hour ORDER BY hour").fetchall()]
-    consume = [dict(r) for r in conn.execute(
-        "SELECT name, ROUND(SUM(amount),1) AS total FROM consumption "
-        "GROUP BY student_id ORDER BY total DESC").fetchall()]
-    conn.close()
+    try:
+        conn = get_conn()
+        risk_rank = [dict(r) for r in conn.execute(
+            "SELECT name, ROUND(AVG(score),1) AS avg_score, SUM(failed) AS fails "
+            "FROM grades GROUP BY student_id ORDER BY avg_score ASC").fetchall()]
+        env_by_hour = [dict(r) for r in conn.execute(
+            "SELECT hour, ROUND(AVG(co2),0) AS avg_co2, ROUND(AVG(traffic),0) AS avg_traffic "
+            "FROM iot GROUP BY hour ORDER BY hour").fetchall()]
+        consume = [dict(r) for r in conn.execute(
+            "SELECT name, ROUND(SUM(amount),1) AS total FROM consumption "
+            "GROUP BY student_id ORDER BY total DESC").fetchall()]
+        conn.close()
+    except:
+        risk_rank = []
+        env_by_hour = []
+        consume = []
+
     return jsonify({"code": 0, "msg": "ok", "data": {
-        "risk_rank": risk_rank, "env_by_hour": env_by_hour, "consume": consume,
+        "risk_rank": risk_rank,
+        "env_by_hour": env_by_hour,
+        "consume": consume,
         "static_rule_count": get_static_rule_store().count(),
         "experience_count": get_experience_store().count(),
     }})

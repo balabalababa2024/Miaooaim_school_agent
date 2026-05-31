@@ -9,17 +9,17 @@ os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 
 from sentence_transformers import SentenceTransformer
 
-# ===================== 数据库配置（改你自己的密码）=====================
+# ===================== 数据库配置（已经改成你的新库）=====================
 DB_CONFIG = {
-    "dbname": "rag_db",
+    "dbname": "my_new_agent_pg",    # 你的新库
     "user": "postgres",
-    "password": "123456",  # <-- 改成你的 PostgreSQL 密码
+    "password": "123456",
     "host": "localhost",
     "port": 5432
 }
 # =========================================================================
 
-# 加载向量模型（国内镜像下载，m3e-small 512维）
+# 加载向量模型
 model = SentenceTransformer("moka-ai/m3e-small")
 
 # 从 rules.txt 读取校规
@@ -36,25 +36,13 @@ conn.autocommit = True
 register_vector(conn)
 cur = conn.cursor()
 
-# 1. 开启向量扩展
-cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
-
-# 2. 创建向量表
+# 先创建唯一索引（修复报错关键！）
 cur.execute('''
-CREATE TABLE IF NOT EXISTS school_rules (
-    id SERIAL PRIMARY KEY,
-    content TEXT NOT NULL,
-    embedding vector(512) NOT NULL
-);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_static_rule_content
+ON static_rule (content);
 ''')
 
-# 3. 创建唯一索引（去重关键：内容一样就不插入）
-cur.execute('''
-CREATE UNIQUE INDEX IF NOT EXISTS idx_school_rules_content
-ON school_rules (content);
-''')
-
-# 4. 读取并向量化
+# 2. 读取并向量化 rules.txt
 rules = load_rules()
 if not rules:
     print("⚠️ rules.txt 中没有校规内容")
@@ -62,26 +50,26 @@ if not rules:
     conn.close()
     exit()
 
+print("✅ 正在生成向量...")
 vectors = model.encode(rules)
 data = list(zip(rules, vectors))
 
-# 5. 批量插入（ON CONFLICT 自动跳过重复）
+# 3. 批量插入 static_rule
 insert_sql = '''
-INSERT INTO school_rules (content, embedding)
+INSERT INTO static_rule (content, embedding)
 VALUES %s
 ON CONFLICT (content) DO NOTHING;
 '''
 execute_values(cur, insert_sql, data, page_size=100)
 
-print(f"✅ 导入完成！共 {len(rules)} 条（重复自动跳过）")
+print(f"✅ 导入完成！共 {len(rules)} 条校规已存入 my_new_agent_pg → static_rule")
 
-# 6. 测试语义查询
-# 6. 测试语义查询
+# 4. 测试语义查询
 def search(query, top_k=3):
     q_vec = model.encode(query)
     cur.execute('''
         SELECT content, embedding <=> %s AS distance
-        FROM school_rules
+        FROM static_rule
         ORDER BY embedding <=> %s
         LIMIT %s;
     ''', (q_vec, q_vec, top_k))
@@ -89,8 +77,8 @@ def search(query, top_k=3):
 
 # 测试
 print("\n" + "="*50)
-print("🔍 测试查询：划船？")
-result = search("划船？")
+print("🔍 测试：划船？")
+result = search("划船")
 for content, dist in result:
     print(f"📌 匹配度：{1-dist:.2f} | {content}")
 

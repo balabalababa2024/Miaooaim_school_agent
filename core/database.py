@@ -18,20 +18,16 @@ def get_embedding(text: str):
 def vector_to_str(emb):
     return "[" + ",".join(map(str, emb)) + "]"
 
-# ===================== DB 连接 =====================
+# ===================== DB 连接 → 已改成你的新库 my_new_agent_pg =====================
 def get_conn():
     conn = psycopg2.connect(
         host="127.0.0.1",
         port=5432,
-        dbname="campus",
+        dbname="my_new_agent_pg",
         user="postgres",
         password="123456"
     )
-    conn.autocommit = True
-    cur = conn.cursor()
-    cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
     register_vector(conn)
-    conn.autocommit = False
     return conn
 
 get_db = get_conn
@@ -86,6 +82,7 @@ def init_db():
     conn = get_conn()
     cur = conn.cursor()
 
+    # ✅ 静态校规表（你现在用的）
     cur.execute("""
     CREATE TABLE IF NOT EXISTS static_rule (
         id SERIAL PRIMARY KEY,
@@ -94,6 +91,7 @@ def init_db():
         embedding vector(512)
     );""")
 
+    # ✅ 动态经验表（你现在用的）
     cur.execute("""
     CREATE TABLE IF NOT EXISTS dynamic_plan_experience (
         id SERIAL PRIMARY KEY,
@@ -102,6 +100,7 @@ def init_db():
         embedding vector(512)
     );""")
 
+    # -------------------- 以下业务表你不用动 --------------------
     cur.execute("""
     CREATE TABLE IF NOT EXISTS users (
         student_id TEXT PRIMARY KEY, name TEXT, pwd_hash TEXT, salt TEXT, role TEXT, status TEXT, created_at TEXT
