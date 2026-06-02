@@ -158,3 +158,24 @@ tr:hover td{background:rgba(108,139,255,.07)}
 .btn-sm+.btn-sm{margin-left:6px}
 
 @media(max-width:980px){.grid,.charts,.result-grid,.kpis,.form-row{grid-template-columns:1fr}}
+
+/* 博弈协商时间线增强 */
+.round{position:relative;margin-bottom:16px;transition:all .3s ease}
+.round:hover{border-color:var(--pri);box-shadow:0 4px 20px rgba(108,139,255,.15)}
+.round-head{cursor:pointer;user-select:none}
+.round-head:hover{background:#283070}
+.round-body{animation:fadeSlide .3s ease}
+@keyframes fadeSlide{from{opacity:0;max-height:0}to{opacity:1;max-height:1000px}}
+.snap .pill{flex:1;min-width:140px;transition:border-color .2s}
+.snap .pill:hover{border-color:var(--pri);background:#1a2050}
+.conf{position:relative;padding-left:28px}
+.conf .tag{position:absolute;left:11px;top:9px}
+.act{position:relative;padding-left:28px}
+.act::before{content:'';position:absolute;left:11px;top:14px;width:8px;height:8px;
+  border-radius:50%;background:var(--ok);box-shadow:0 0 6px var(--ok)}
+.reuse-banner{animation:bannerIn .5s ease}
+@keyframes bannerIn{from{opacity:0;transform:translateY(-10px)}to{opacity:1;transform:none}}
+.flow::-webkit-scrollbar{width:6px}
+.flow::-webkit-scrollbar-track{background:transparent}
+.flow::-webkit-scrollbar-thumb{background:var(--line);border-radius:3px}
+.flow::-webkit-scrollbar-thumb:hover{background:var(--pri)}

@@ -14,8 +14,9 @@ SET FOREIGN_KEY_CHECKS = 1;
 CREATE TABLE users (
     id BIGINT PRIMARY KEY AUTO_INCREMENT,
     username VARCHAR(50) NOT NULL UNIQUE,
-    password VARCHAR(100) NOT NULL,
+    password VARCHAR(256) NOT NULL,
     role VARCHAR(20) DEFAULT 'student',
+    status VARCHAR(20) DEFAULT 'active',
     create_time DATETIME DEFAULT NOW()
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
@@ -103,3 +104,6 @@ INSERT INTO iot (floor, hour, traffic, co2, temp) VALUES
 -- 插入规划历史
 INSERT INTO plan_history (student_id, request, plan, conflict_log) VALUES
 ('2026001', '帮我规划本周学习和自习', '周一~周五：白天上课，晚上3-4楼自习；周末上午刷题，下午休息', '无冲突');
+ ALTER TABLE users ADD COLUMN status VARCHAR(20) DEFAULT 'active';
+   ALTER TABLE users MODIFY COLUMN password VARCHAR(256) NOT NULL;
+    DELETE FROM student_profile WHERE student_id = '2024011';

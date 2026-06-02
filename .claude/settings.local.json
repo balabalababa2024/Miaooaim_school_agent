@@ -3,7 +3,8 @@
     "allow": [
       "Bash(python -c \"import flask, pandas; print\\('flask', flask.__version__, '| pandas', pandas.__version__\\)\")",
       "Bash(python -c ' *)",
-      "Bash(PYTHONIOENCODING=utf-8 python *)"
+      "Bash(PYTHONIOENCODING=utf-8 python *)",
+      "Bash(pip show *)"
     ]
   }
 }

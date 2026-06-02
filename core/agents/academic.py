@@ -1,5 +1,5 @@
 from ..llm import llm
-from ..database import get_conn
+from ..database import get_mysql_conn
 from ..memory import AgentMemory
 
 class AcademicAgent:
@@ -12,8 +12,8 @@ class AcademicAgent:
 
     def analyze(self, student_id, daily_hours=4.0):
         """分析成绩 → 生成学习计划"""
-        conn = get_conn()
-        cursor = conn.cursor(dictionary=True)
+        conn = get_mysql_conn()
+        cursor = conn.cursor()
 
         # 从 grades 表获取该学生所有科目成绩
         cursor.execute("""
@@ -79,13 +79,45 @@ class AcademicAgent:
             "raw_data": grades
         }
 
-    def revise(self, state, feedback):
-        """根据反馈修订学习计划"""
+    def revise(self, state, conflict):
+        """
+        根据结构化冲突信息修订学习计划。
+        conflict: {type, description, suggestion, evidence, ...}
+        """
+        conflict_type = conflict.get("type", "")
+        suggestion = conflict.get("suggestion", "请自行调整")
+        description = conflict.get("description", "")
+
+        # 根据冲突类型做具体数值调整
+        if conflict_type == "time_overflow":
+            # 学习时长超限 → 降低每日学习时长
+            evidence = conflict.get("evidence", {})
+            limit = evidence.get("limit", 12.0)
+            env_hours = evidence.get("env_hours", 0)
+            new_hours = max(limit - env_hours, 3.0)  # 至少保留3h
+            if "options" in state and state["options"]:
+                state["options"][0]["daily_hours"] = round(new_hours, 1)
+            suggestion = f"将每日学习时长从 {evidence.get('acad_hours', '?')}h 降至 {new_hours:.1f}h"
+
+        if conflict_type == "low_gpa_risk":
+            # 挂科风险 → 在 narrative 中强调补习
+            weak = conflict.get("evidence", {}).get("weak_subjects", [])
+            suggestion = f"请在计划中优先安排以下挂科科目的补习时间：{', '.join(weak)}"
+
         prompt = f"""
-请根据用户反馈优化学习计划：
-用户反馈：{feedback}
-原计划：{state['narrative']}
-输出优化后的简洁分点版本。
+你是学业规划Agent。在多智能体协商中发现了以下冲突：
+
+冲突类型：{conflict_type}
+问题描述：{description}
+调整建议：{suggestion}
+
+你当前的学习计划：
+{state.get('narrative', '')}
+
+请根据冲突信息修订你的计划。要求：
+1. 解决上述冲突
+2. 保持学业效果最大化
+3. 输出修订后的简洁分点计划
 """
         state["narrative"] = llm(prompt)
         return state

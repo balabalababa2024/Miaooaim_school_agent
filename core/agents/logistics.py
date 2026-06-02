@@ -1,5 +1,5 @@
 from ..llm import llm
-from ..database import get_conn
+from ..database import get_mysql_conn
 from ..memory import AgentMemory
 
 class LogisticsAgent:
@@ -12,8 +12,8 @@ class LogisticsAgent:
 
     def analyze(self, student_id, monthly_budget=1200.0):
         """分析消费 → 生成预算方案"""
-        conn = get_conn()
-        cursor = conn.cursor(dictionary=True)
+        conn = get_mysql_conn()
+        cursor = conn.cursor()
 
         # 从 consumption 按类别统计总消费
         cursor.execute("""
@@ -48,15 +48,44 @@ class LogisticsAgent:
             "daily_meal_cap": daily_meal,
             "saving_plan": advice,
             "expenses": expenses,
-            "utility_tips": ["节约用水用电","错峰消费"]
+            "utility_tips": ["节约用水用电", "错峰消费"]
         }
 
-    def revise(self, state, feedback):
+    def revise(self, state, conflict):
+        """
+        根据结构化冲突信息修订预算方案。
+        conflict: {type, description, suggestion, evidence, ...}
+        """
+        conflict_type = conflict.get("type", "")
+        suggestion = conflict.get("suggestion", "请自行调整")
+        description = conflict.get("description", "")
+
+        # 根据冲突类型做具体数值调整
+        if conflict_type == "budget_overrun":
+            evidence = conflict.get("evidence", {})
+            budget = evidence.get("budget", 1000)
+            spent = evidence.get("spent", 0)
+            # 重新计算日均餐费上限（压缩到预算内）
+            remaining = max(budget - spent, 0)
+            days_left = 15  # 假设月中，还有15天
+            new_daily = round(remaining * 0.7 / days_left, 1) if days_left > 0 else 10
+            state["daily_meal_cap"] = new_daily
+            suggestion = f"已超支，剩余 {remaining:.0f}元 需精打细算，日均餐费降至 {new_daily}元"
+
         prompt = f"""
-根据反馈优化预算方案：
-意见：{feedback}
-原方案：{state['saving_plan']}
-输出优化版。
+你是后勤消费Agent。在多智能体协商中发现了以下冲突：
+
+冲突类型：{conflict_type}
+问题描述：{description}
+调整建议：{suggestion}
+
+你当前的预算方案：
+{state.get('saving_plan', '')}
+
+请根据冲突信息修订你的方案。要求：
+1. 解决上述冲突
+2. 给出具体的省钱策略
+3. 输出修订后的简洁分点方案
 """
         state["saving_plan"] = llm(prompt)
         return state

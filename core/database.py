@@ -1,25 +1,44 @@
 import os
-import psycopg2
+import logging
 import json
 import datetime
-import hashlib
-import secrets
-from pgvector.psycopg2 import register_vector
-from sentence_transformers import SentenceTransformer
 
-# ===================== m3e-small 中文向量模型 =====================
-embedding_model = SentenceTransformer("moka-ai/m3e-small", device="cpu")
+logger = logging.getLogger(__name__)
+
+# ===================== 懒加载 embedding 模型 =====================
+_embedding_model = None
+
+def _get_embedding_model():
+    """懒加载 SentenceTransformer，首次调用时才下载/加载模型"""
+    global _embedding_model
+    if _embedding_model is None:
+        try:
+            from sentence_transformers import SentenceTransformer
+            logger.info("正在加载 m3e-small 向量模型...")
+            _embedding_model = SentenceTransformer("moka-ai/m3e-small", device="cpu")
+            logger.info("m3e-small 向量模型加载完成")
+        except Exception as e:
+            logger.warning(f"向量模型加载失败（向量搜索功能不可用）: {e}")
+            _embedding_model = False  # 标记为已尝试，避免重复加载
+    return _embedding_model
 
 def get_embedding(text: str):
-    emb = embedding_model.encode(text, normalize_embeddings=True)
+    model = _get_embedding_model()
+    if model is False:
+        # 模型加载失败，返回零向量（降级处理）
+        logger.warning("向量模型不可用，返回零向量")
+        return [0.0] * 512
+    emb = model.encode(text, normalize_embeddings=True)
     return emb.tolist()
 
 # ===================== 向量转字符串（给 PostgreSQL 使用）=====================
 def vector_to_str(emb):
     return "[" + ",".join(map(str, emb)) + "]"
 
-# ===================== DB 连接 → 已改成你的新库 my_new_agent_pg =====================
+# ===================== DB 连接 =====================
 def get_conn():
+    import psycopg2
+    from pgvector.psycopg2 import register_vector
     conn = psycopg2.connect(
         host="127.0.0.1",
         port=5432,
@@ -32,7 +51,21 @@ def get_conn():
 
 get_db = get_conn
 
-# ===================== 向量存储（最终修复版）=====================
+# ===================== MySQL 业务库连接 =====================
+def get_mysql_conn():
+    """返回 MySQL 业务库连接（pymysql），用于 grades/consumption/iot 等业务表"""
+    import pymysql
+    return pymysql.connect(
+        host=os.getenv("MYSQL_HOST", "127.0.0.1"),
+        port=int(os.getenv("MYSQL_PORT", "3306")),
+        user=os.getenv("MYSQL_USER", "root"),
+        password=os.getenv("MYSQL_PASSWORD", "123456"),
+        database=os.getenv("MYSQL_DATABASE", "my_agent_db"),
+        charset="utf8mb4",
+        cursorclass=pymysql.cursors.DictCursor
+    )
+
+# ===================== 向量存储 =====================
 class PGVectorStore:
     def __init__(self, table):
         self.table = table
@@ -82,7 +115,6 @@ def init_db():
     conn = get_conn()
     cur = conn.cursor()
 
-    # ✅ 静态校规表（你现在用的）
     cur.execute("""
     CREATE TABLE IF NOT EXISTS static_rule (
         id SERIAL PRIMARY KEY,
@@ -91,7 +123,6 @@ def init_db():
         embedding vector(512)
     );""")
 
-    # ✅ 动态经验表（你现在用的）
     cur.execute("""
     CREATE TABLE IF NOT EXISTS dynamic_plan_experience (
         id SERIAL PRIMARY KEY,
@@ -100,7 +131,6 @@ def init_db():
         embedding vector(512)
     );""")
 
-    # -------------------- 以下业务表你不用动 --------------------
     cur.execute("""
     CREATE TABLE IF NOT EXISTS users (
         student_id TEXT PRIMARY KEY, name TEXT, pwd_hash TEXT, salt TEXT, role TEXT, status TEXT, created_at TEXT
