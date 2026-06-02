@@ -1,5 +1,5 @@
 from ..llm import llm
-from ..database import get_mysql_conn
+from ..langchain_agent import query_consumption_from_db
 from ..memory import AgentMemory
 
 class LogisticsAgent:
@@ -12,17 +12,8 @@ class LogisticsAgent:
 
     def analyze(self, student_id, monthly_budget=1200.0):
         """分析消费 → 生成预算方案"""
-        conn = get_mysql_conn()
-        cursor = conn.cursor()
-
-        # 从 consumption 按类别统计总消费
-        cursor.execute("""
-            SELECT category, SUM(amount) AS total, COUNT(*) AS cnt
-            FROM consumption
-            WHERE student_id = %s
-            GROUP BY category
-        """, (student_id,))
-        expenses = cursor.fetchall()
+        # 使用统一的数据查询函数
+        expenses = query_consumption_from_db(student_id)
         total_spent = sum(e["total"] for e in expenses)
 
         context = "\n".join([f"{e['category']}：{e['total']:.1f}元" for e in expenses])
@@ -39,7 +30,8 @@ class LogisticsAgent:
 
         daily_meal = round(monthly_budget * 0.7 / 30, 1)
 
-        conn.close()
+        # 记忆：保存分析结果
+        self.memory.add_interaction("system", f"消费分析：总预算{monthly_budget}，已花{total_spent:.0f}，日均餐费上限{daily_meal}")
 
         return {
             "agent": self.name,
@@ -52,22 +44,17 @@ class LogisticsAgent:
         }
 
     def revise(self, state, conflict):
-        """
-        根据结构化冲突信息修订预算方案。
-        conflict: {type, description, suggestion, evidence, ...}
-        """
+        """根据结构化冲突信息修订预算方案"""
         conflict_type = conflict.get("type", "")
         suggestion = conflict.get("suggestion", "请自行调整")
         description = conflict.get("description", "")
 
-        # 根据冲突类型做具体数值调整
         if conflict_type == "budget_overrun":
             evidence = conflict.get("evidence", {})
             budget = evidence.get("budget", 1000)
             spent = evidence.get("spent", 0)
-            # 重新计算日均餐费上限（压缩到预算内）
             remaining = max(budget - spent, 0)
-            days_left = 15  # 假设月中，还有15天
+            days_left = 15
             new_daily = round(remaining * 0.7 / days_left, 1) if days_left > 0 else 10
             state["daily_meal_cap"] = new_daily
             suggestion = f"已超支，剩余 {remaining:.0f}元 需精打细算，日均餐费降至 {new_daily}元"
@@ -88,4 +75,5 @@ class LogisticsAgent:
 3. 输出修订后的简洁分点方案
 """
         state["saving_plan"] = llm(prompt)
+        self.memory.add_interaction("system", f"修订预算，冲突类型：{conflict_type}")
         return state

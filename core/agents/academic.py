@@ -1,5 +1,5 @@
 from ..llm import llm
-from ..database import get_mysql_conn
+from ..langchain_agent import query_grades_from_db
 from ..memory import AgentMemory
 
 class AcademicAgent:
@@ -12,16 +12,8 @@ class AcademicAgent:
 
     def analyze(self, student_id, daily_hours=4.0):
         """分析成绩 → 生成学习计划"""
-        conn = get_mysql_conn()
-        cursor = conn.cursor()
-
-        # 从 grades 表获取该学生所有科目成绩
-        cursor.execute("""
-            SELECT subject, score, failed
-            FROM grades
-            WHERE student_id = %s
-        """, (student_id,))
-        grades_list = cursor.fetchall()
+        # 使用统一的数据查询函数
+        grades_list = query_grades_from_db(student_id)
 
         # 科目均分 & 挂科统计
         subject_map = {}
@@ -42,8 +34,6 @@ class AcademicAgent:
                 "has_fail": item["failed"]
             })
 
-        conn.close()
-
         # 构建大模型上下文
         context_lines = [
             f"科目：{g['subject']}，均分：{g['avg_score']:.1f}，是否挂科：{'是' if g['has_fail'] else '否'}"
@@ -60,6 +50,9 @@ class AcademicAgent:
 请生成一份**可执行、简洁、分点**的学习提升计划，重点优先提升挂科/低分科目。
 """
         plan = llm(prompt)
+
+        # 记忆：保存分析结果
+        self.memory.add_interaction("system", f"分析完成：{len(grades)}个科目，风险分{sum(1 for g in grades if g['has_fail'])}")
 
         # 风险分 = 挂科数量
         risk_score = sum(1 for g in grades if g["has_fail"])
@@ -80,27 +73,21 @@ class AcademicAgent:
         }
 
     def revise(self, state, conflict):
-        """
-        根据结构化冲突信息修订学习计划。
-        conflict: {type, description, suggestion, evidence, ...}
-        """
+        """根据结构化冲突信息修订学习计划"""
         conflict_type = conflict.get("type", "")
         suggestion = conflict.get("suggestion", "请自行调整")
         description = conflict.get("description", "")
 
-        # 根据冲突类型做具体数值调整
         if conflict_type == "time_overflow":
-            # 学习时长超限 → 降低每日学习时长
             evidence = conflict.get("evidence", {})
             limit = evidence.get("limit", 12.0)
             env_hours = evidence.get("env_hours", 0)
-            new_hours = max(limit - env_hours, 3.0)  # 至少保留3h
+            new_hours = max(limit - env_hours, 3.0)
             if "options" in state and state["options"]:
                 state["options"][0]["daily_hours"] = round(new_hours, 1)
             suggestion = f"将每日学习时长从 {evidence.get('acad_hours', '?')}h 降至 {new_hours:.1f}h"
 
         if conflict_type == "low_gpa_risk":
-            # 挂科风险 → 在 narrative 中强调补习
             weak = conflict.get("evidence", {}).get("weak_subjects", [])
             suggestion = f"请在计划中优先安排以下挂科科目的补习时间：{', '.join(weak)}"
 
@@ -120,4 +107,5 @@ class AcademicAgent:
 3. 输出修订后的简洁分点计划
 """
         state["narrative"] = llm(prompt)
+        self.memory.add_interaction("system", f"修订计划，冲突类型：{conflict_type}")
         return state

@@ -8,6 +8,7 @@
 """
 import json
 import os
+from datetime import datetime
 
 BASE = os.path.dirname(os.path.dirname(__file__))
 MEM_DIR = os.path.join(BASE, "data", "memory")
@@ -15,6 +16,10 @@ MEM_DIR = os.path.join(BASE, "data", "memory")
 
 def _ensure():
     os.makedirs(MEM_DIR, exist_ok=True)
+
+
+def _now():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 class _JsonMemory:
@@ -31,6 +36,9 @@ class _JsonMemory:
 
     def set(self, key, value):
         self.data[key] = value
+        self._flush()
+
+    def _flush(self):
         with open(self.path, "w", encoding="utf-8") as f:
             json.dump(self.data, f, ensure_ascii=False, indent=2)
 
@@ -60,9 +68,34 @@ class GlobalMemory(_JsonMemory):
 
 
 class AgentMemory(_JsonMemory):
-    """Agent 私有记忆，按 agent 名隔离文件。"""
+    """Agent 私有记忆，按 agent 名隔离文件。支持交互历史。"""
     def __init__(self, agent_name):
         super().__init__(f"agent_{agent_name}")
+
+    def add_interaction(self, role, content):
+        """记录一次交互（供 LangChain 恢复上下文）"""
+        history = self.get("history", [])
+        history.append({
+            "role": role,
+            "content": content[:500],  # 截断避免文件过大
+            "time": _now()
+        })
+        # 保留最近 50 条
+        self.set("history", history[-50:])
+
+    def get_history(self, n=20):
+        """获取最近 n 条交互历史"""
+        return self.get("history", [])[-n:]
+
+    def save_summary(self, summary):
+        """保存一次规划的摘要（长期记忆）"""
+        plans = self.get("past_plans", [])
+        plans.append({"summary": summary[:300], "time": _now()})
+        self.set("past_plans", plans[-20:])
+
+    def get_past_plans(self, n=5):
+        """获取最近 n 次规划摘要"""
+        return self.get("past_plans", [])[-n:]
 
 
 class ScratchMemory:

@@ -1,10 +1,14 @@
 import json
+import logging
 from ..llm import llm
 from ..database import get_mysql_conn
+from ..langchain_agent import run_campus_agent
 from .academic import AcademicAgent
 from .logistics import LogisticsAgent
 from .study_env import StudyEnvAgent
 from .policy import PolicyAgent
+
+logger = logging.getLogger(__name__)
 
 class MasterAgent:
     """母智能体：多轮博弈协商调度、冲突裁决、最终综合"""
@@ -197,7 +201,10 @@ class MasterAgent:
 
     def _generate_final_report(self, student_id, acad, logi, env, policy,
                                 round_logs, consensus):
-        """调用大模型生成最终整合规划"""
+        """
+        使用 LangChain Agent 生成最终整合规划。
+        Agent 可调用工具查询真实数据（成绩、消费、IoT、校规），实现数据驱动的规划。
+        """
         # 收集协商过程摘要
         negotiation_summary = []
         for rl in round_logs:
@@ -214,33 +221,45 @@ class MasterAgent:
                 negotiation_summary.append(f"第{round_num}轮：达成共识 ✓")
 
         neg_text = "\n".join(negotiation_summary) if negotiation_summary else "无协商记录"
-
         consensus_text = "已达成共识" if consensus else "未完全达成共识，以下为最大均衡方案"
 
         prompt = f"""
-你是校园全能规划助手。经过多智能体博弈协商，以下是最终结果。
+经过多智能体博弈协商，以下是各Agent的方案汇总。请调用工具查询学生的真实数据（成绩、消费、环境），整合生成最终规划。
 
 协商状态：{consensus_text}
-
 协商过程：
 {neg_text}
 
-【学业规划Agent方案】
-{acad.get('narrative', '无')}
+【学业Agent方案】
+{acad.get('narrative', '无')[:500]}
 
-【自习环境Agent方案】
-{env.get('narrative', '无')}
+【自习Agent方案】
+{env.get('narrative', '无')[:500]}
 
-【后勤消费Agent方案】
-{logi.get('saving_plan', '无')}
+【消费Agent方案】
+{logi.get('saving_plan', '无')[:500]}
 
-【政策合规约束】
-{policy.get('narrative', '无')}
+【合规约束】
+{policy.get('narrative', '无')[:300]}
 
-请整合以上所有方案，生成一份**完整、可执行**的学生规划方案。
-要求分模块输出：学业安排、自习计划、消费预算、合规提醒。
-每个模块3-5条具体可执行的要点。
+请使用工具查询该学生的真实数据，然后整合以上方案，输出完整规划：
+1. 学业安排（3-5条，引用真实成绩数据）
+2. 自习计划（3-5条，引用IoT环境数据）
+3. 消费预算（3-5条，引用真实消费数据）
+4. 合规提醒（3-5条，引用校规）
 """
+
+        # 使用 LangChain Agent（可调用工具获取真实数据）
+        try:
+            report = run_campus_agent(student_id, prompt, agent_memory=self.academic.memory)
+            if report and not report.startswith("规划生成失败"):
+                # 保存规划摘要到记忆
+                self.academic.memory.save_summary(report[:200])
+                return report
+        except Exception as e:
+            logger.warning(f"LangChain Agent 执行失败，回退到基础LLM: {e}")
+
+        # 回退：直接调用 LLM（不使用工具）
         return llm(prompt)
 
     def _save_plan_history(self, student_id, plan, round_logs):
