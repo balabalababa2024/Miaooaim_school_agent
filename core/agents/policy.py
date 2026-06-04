@@ -1,6 +1,24 @@
-from ..llm import llm
+import json
+import logging
+from ..llm import create_agent, run_agent, llm
+from ..tools import get_policy_tools
 from ..memory import GlobalMemory
 from ..database import get_static_rule_store
+
+logger = logging.getLogger(__name__)
+
+ANALYZE_SYSTEM_PROMPT = """你是政策合规智能体。
+你可以使用以下工具：
+- get_policy_constraints: 获取校园政策硬约束参数
+- search_policy: 搜索校园校规条文
+
+请先调用 get_policy_constraints 获取约束参数，然后输出合规约束摘要。"""
+
+ASK_SYSTEM_PROMPT = """你是校园政策助手。
+你可以使用以下工具：
+- search_policy: 根据关键词搜索校园校规
+
+请调用 search_policy 工具搜索相关校规，然后基于搜索结果回答用户问题。"""
 
 
 class PolicyAgent:
@@ -14,27 +32,37 @@ class PolicyAgent:
 
     def get_constraints(self):
         return {
-            "study_room_close": 22.5,       # 自习室关门时间
-            "lights_out": 23.0,             # 宿舍熄灯时间
-            "scholarship_gpa": 85,          # 奖学金GPA门槛
-            "monthly_utility_cap": 150,     # 月度水电费上限
-            "max_daily_study": 12.0,        # 每日学习上限
-            "min_daily_study": 1.0,         # 每日学习下限
-            "max_budget_ratio": 1.2,        # 预算超支容忍比例
+            "study_room_close": 22.5,
+            "lights_out": 23.0,
+            "scholarship_gpa": 85,
+            "monthly_utility_cap": 150,
+            "max_daily_study": 12.0,
+            "min_daily_study": 1.0,
+            "max_budget_ratio": 1.2,
         }
 
     def analyze(self):
+        """通过 Tool Calling 获取政策约束"""
+        tools = get_policy_tools()
+        executor = create_agent(tools, ANALYZE_SYSTEM_PROMPT)
+
+        try:
+            narrative = run_agent(executor, "请获取校园政策硬约束参数，并输出约束摘要。")
+        except Exception as e:
+            logger.warning(f"PolicyAgent analyze tool calling 失败，回退: {e}")
+            narrative = ("已加载校园政策与硬约束：自习室22:30关门、宿舍23:00熄灯、"
+                         "奖学金GPA门槛85分、月度水电费上限150元。")
+
         return {
             "agent": self.name,
             "constraints": self.get_constraints(),
-            "narrative": "已加载校园政策与硬约束：自习室22:30关门、宿舍23:00熄灯、"
-                         "奖学金GPA门槛85分、月度水电费上限150元。"
+            "narrative": narrative
         }
 
     def validate(self, academic_state, logistics_state, env_state):
         """
-        增强版冲突检测，返回结构化冲突列表。
-        每个冲突包含: severity, between, type, description, evidence, suggestion
+        冲突检测（纯 Python 确定性逻辑，不经过 LLM）。
+        保留原有逻辑不变。
         """
         rules = self.get_constraints()
         conflicts = []
@@ -136,19 +164,23 @@ class PolicyAgent:
         return conflicts
 
     def ask(self, question):
-        hits = self.rule_store.search(question, top_k=3)
-        if not hits:
-            return {"answer": "未查询到相关校规"}
-        context = "\n".join([h["text"] for h in hits])
-        answer = llm(f"校规：{context}\n问题：{question}\n直接回答")
-        return {
-            "answer": answer,
-            "sources": [h["text"] for h in hits]
-        }
+        """通过 Tool Calling 回答校规问题"""
+        tools = get_policy_tools()
+        executor = create_agent(tools, ASK_SYSTEM_PROMPT)
+
+        try:
+            answer = run_agent(executor, question)
+        except Exception as e:
+            logger.warning(f"PolicyAgent ask tool calling 失败，回退: {e}")
+            hits = self.rule_store.search(question, top_k=3)
+            context = "\n".join([h["text"] for h in hits]) if hits else "未找到相关校规"
+            answer = llm(f"校规：{context}\n问题：{question}\n直接回答")
+
+        return {"answer": answer}
 
     @staticmethod
     def _fmt_time(hour_float):
-        """将小数时间转为 HH:MM 格式，如 22.5 → '22:30'"""
+        """将小数时间转为 HH:MM 格式"""
         h = int(hour_float)
         m = int((hour_float - h) * 60)
         return f"{h:02d}:{m:02d}"

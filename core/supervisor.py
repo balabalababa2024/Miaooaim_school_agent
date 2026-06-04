@@ -1,9 +1,26 @@
 import json
 import datetime
-from core.llm import llm
+import logging
+from .llm import create_agent, run_agent, llm
+from .tools import get_orchestrator_tools
 from .database import get_experience_store, get_static_rule_store
 from .memory import GlobalMemory, ScratchMemory
-from core.agents.master import MasterAgent
+from .agents.master import MasterAgent
+
+logger = logging.getLogger(__name__)
+
+DECOMPOSE_SYSTEM_PROMPT = """你是参数解析助手。
+你可以使用以下工具：
+- parse_planning_params: 从用户的自然语言请求中提取结构化规划参数
+
+请调用 parse_planning_params 工具，从用户输入中提取结构化参数。
+返回 JSON 格式的参数。"""
+
+QA_SYSTEM_PROMPT = """你是校园政策助手。
+你可以使用以下工具：
+- search_policy: 根据关键词搜索校园校规
+
+请调用 search_policy 工具搜索相关校规，然后基于搜索结果回答用户问题。"""
 
 
 WEIGHTS = {"academic": 0.4, "env": 0.3, "budget": 0.2, "policy": 0.1}
@@ -15,60 +32,65 @@ class Supervisor:
         self.g = GlobalMemory.instance()
         self.master = MasterAgent()
 
-    # ===================== 校规 QA =====================
+    # ===================== 校规 QA（Tool Calling） =====================
     def policy_qa(self, query):
-        store = get_static_rule_store()
-        docs = store.search(query, top_k=3)
+        tools = get_orchestrator_tools()
+        executor = create_agent(tools, QA_SYSTEM_PROMPT)
 
-        context = "\n".join([f"· {d['text']}" for d in docs])
-        prompt = f"""
-你是校园政策助手，请根据校规回答。
-校规：
-{context}
-问题：{query}
-回答：
-"""
-        answer = llm(prompt)
+        try:
+            answer = run_agent(executor, query)
+        except Exception as e:
+            logger.warning(f"policy_qa tool calling 失败，回退: {e}")
+            store = get_static_rule_store()
+            docs = store.search(query, top_k=3)
+            context = "\n".join([f"· {d['text']}" for d in docs])
+            answer = llm(f"校规：{context}\n问题：{query}\n回答：")
+
+        # 获取引用的校规
+        store = get_static_rule_store()
+        refs = store.search(query, top_k=3)
+
         return {
             "question": query,
             "answer": answer,
-            "refs": docs
+            "refs": refs
         }
 
-    # ===================== CoT 需求拆解 =====================
+    # ===================== CoT 需求拆解（Tool Calling） =====================
     def decompose(self, text):
-        prompt = f"""
-从用户请求中提取结构化参数，返回JSON（不要输出其他内容）：
+        tools = get_orchestrator_tools()
+        executor = create_agent(tools, DECOMPOSE_SYSTEM_PROMPT)
 
-字段说明：
-- budget: 月度预算（数字，默认1000）
-- daily_hours: 每日学习小时数（数字，默认4）
-- want_env: 是否需要好的自习环境（布尔值，默认true）
-- care_policy: 是否关注校规合规（布尔值，默认true）
-- intensity: 学习强度（"low"/"normal"/"high"，默认"normal"）
-- subjects: 重点关注的科目（字符串数组，默认[]）
-
-用户请求：{text}
-
-请直接输出JSON，例如：
-{{"budget": 1000, "daily_hours": 4, "want_env": true, "care_policy": true, "intensity": "normal", "subjects": []}}
-"""
         try:
-            raw = llm(prompt)
-            # 尝试提取JSON部分
+            raw = run_agent(executor, f"请解析以下用户请求：{text}")
+            # 尝试提取 JSON
             if "{" in raw and "}" in raw:
                 json_str = raw[raw.index("{"):raw.rindex("}") + 1]
                 return json.loads(json_str)
             return json.loads(raw)
-        except Exception:
-            return {
-                "budget": 1000,
-                "daily_hours": 4,
-                "want_env": True,
-                "care_policy": True,
-                "intensity": "normal",
-                "subjects": []
-            }
+        except Exception as e:
+            logger.warning(f"decompose tool calling 失败，回退: {e}")
+            # fallback: 直接 LLM
+            try:
+                raw = llm(
+                    f"从用户请求中提取结构化参数，返回JSON（不要输出其他内容）：\n"
+                    f"字段：budget,daily_hours,want_env,care_policy,intensity,subjects\n"
+                    f"用户请求：{text}\n"
+                    f"请直接输出JSON"
+                )
+                if "{" in raw and "}" in raw:
+                    json_str = raw[raw.index("{"):raw.rindex("}") + 1]
+                    return json.loads(json_str)
+                return json.loads(raw)
+            except Exception:
+                return {
+                    "budget": 1000,
+                    "daily_hours": 4,
+                    "want_env": True,
+                    "care_policy": True,
+                    "intensity": "normal",
+                    "subjects": []
+                }
 
     # ===================== 主规划入口 =====================
     def plan(self, student_id, request):

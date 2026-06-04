@@ -1,14 +1,30 @@
 import json
 import logging
-from ..llm import llm
+from ..llm import create_agent, run_agent, llm
 from ..database import get_mysql_conn
-from ..langchain_agent import run_campus_agent
+from ..tools import get_data_query_tools
 from .academic import AcademicAgent
 from .logistics import LogisticsAgent
 from .study_env import StudyEnvAgent
 from .policy import PolicyAgent
 
 logger = logging.getLogger(__name__)
+
+FINAL_REPORT_SYSTEM_PROMPT = """你是校园多智能体协同规划平台的综合规划助手。
+
+你可以使用以下工具获取学生的真实数据：
+- query_grades: 查询学生成绩
+- query_consumption: 查询消费明细
+- query_iot_data: 查询自习室环境数据
+- search_policy: 搜索校园校规
+
+请基于真实数据和多智能体协商结果，整合生成最终规划。输出要求：
+1. 学业安排（3-5条，引用真实成绩数据）
+2. 自习计划（3-5条，引用IoT环境数据）
+3. 消费预算（3-5条，引用真实消费数据）
+4. 合规提醒（3-5条，引用校规）
+"""
+
 
 class MasterAgent:
     """母智能体：多轮博弈协商调度、冲突裁决、最终综合"""
@@ -44,7 +60,7 @@ class MasterAgent:
 
         round_logs = []
 
-        # ========== 第1轮：各 Agent 独立提案 ==========
+        # ========== 第1轮：各 Agent 独立提案（Tool Calling） ==========
         acad_state = self.academic.analyze(student_id, daily_hours)
         logi_state = self.logistics.analyze(student_id, budget)
         env_state = self.study_env.analyze(student_id, daily_hours)
@@ -56,7 +72,7 @@ class MasterAgent:
                 acad_state, env_state, logi_state, policy_state
             )
 
-            # 2) PolicyAgent 检测冲突
+            # 2) PolicyAgent 检测冲突（纯 Python 确定性逻辑）
             conflicts = self.policy.validate(acad_state, logi_state, env_state)
 
             # 3) 无冲突 → 达成共识
@@ -71,7 +87,7 @@ class MasterAgent:
                 })
                 break
 
-            # 4) 有冲突 → 分发给相关 Agent 修订
+            # 4) 有冲突 → 分发给相关 Agent 修订（Tool Calling）
             resolutions = []
             rationale = {}
 
@@ -130,7 +146,7 @@ class MasterAgent:
         # 判断是否达成共识（最后一轮无冲突）
         consensus = len(round_logs) > 0 and len(round_logs[-1].get("conflicts", [])) == 0
 
-        # ========== 生成最终综合方案 ==========
+        # ========== 生成最终综合方案（Tool Calling Agent） ==========
         final_report = self._generate_final_report(
             student_id, acad_state, logi_state, env_state, policy_state,
             round_logs, consensus
@@ -202,7 +218,7 @@ class MasterAgent:
     def _generate_final_report(self, student_id, acad, logi, env, policy,
                                 round_logs, consensus):
         """
-        使用 LangChain Agent 生成最终整合规划。
+        使用 Tool Calling Agent 生成最终整合规划。
         Agent 可调用工具查询真实数据（成绩、消费、IoT、校规），实现数据驱动的规划。
         """
         # 收集协商过程摘要
@@ -218,13 +234,12 @@ class MasterAgent:
                 resolve_desc = "; ".join([r["action"][:60] for r in resolutions])
                 negotiation_summary.append(f"第{round_num}轮协商调整：{resolve_desc}")
             if not conflicts:
-                negotiation_summary.append(f"第{round_num}轮：达成共识 ✓")
+                negotiation_summary.append(f"第{round_num}轮：达成共识")
 
         neg_text = "\n".join(negotiation_summary) if negotiation_summary else "无协商记录"
         consensus_text = "已达成共识" if consensus else "未完全达成共识，以下为最大均衡方案"
 
-        prompt = f"""
-经过多智能体博弈协商，以下是各Agent的方案汇总。请调用工具查询学生的真实数据（成绩、消费、环境），整合生成最终规划。
+        prompt = f"""经过多智能体博弈协商，以下是各Agent的方案汇总。请调用工具查询学生的真实数据（成绩、消费、环境），整合生成最终规划。
 
 协商状态：{consensus_text}
 协商过程：
@@ -249,15 +264,16 @@ class MasterAgent:
 4. 合规提醒（3-5条，引用校规）
 """
 
-        # 使用 LangChain Agent（可调用工具获取真实数据）
+        # 使用 Tool Calling Agent（可调用工具获取真实数据）
         try:
-            report = run_campus_agent(student_id, prompt, agent_memory=self.academic.memory)
+            tools = get_data_query_tools()
+            executor = create_agent(tools, FINAL_REPORT_SYSTEM_PROMPT)
+            report = run_agent(executor, prompt)
             if report and not report.startswith("规划生成失败"):
-                # 保存规划摘要到记忆
                 self.academic.memory.save_summary(report[:200])
                 return report
         except Exception as e:
-            logger.warning(f"LangChain Agent 执行失败，回退到基础LLM: {e}")
+            logger.warning(f"Tool Calling Agent 执行失败，回退到基础LLM: {e}")
 
         # 回退：直接调用 LLM（不使用工具）
         return llm(prompt)
@@ -267,7 +283,6 @@ class MasterAgent:
         try:
             conn = get_mysql_conn()
             cursor = conn.cursor()
-            # 将协商日志摘要作为 conflict_log 存储
             conflict_summary = []
             for rl in round_logs:
                 for c in rl.get("conflicts", []):
@@ -276,7 +291,6 @@ class MasterAgent:
                     )
             conflict_log = "\n".join(conflict_summary) if conflict_summary else "无冲突"
 
-            # 将完整协商日志存入 request 字段（作为上下文）
             round_count = len(round_logs)
             request_summary = f"多智能体博弈规划（{round_count}轮协商）"
 

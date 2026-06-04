@@ -1,6 +1,25 @@
-from ..llm import llm
-from ..langchain_agent import query_iot_from_db
+import json
+import logging
+from ..llm import create_agent, run_agent, llm
+from ..tools import get_study_env_tools
 from ..memory import AgentMemory
+
+logger = logging.getLogger(__name__)
+
+ANALYZE_SYSTEM_PROMPT = """你是自习室推荐官。
+你可以使用以下工具：
+- query_iot_data: 查询自习室IoT传感器数据（人流量、CO2、温度）
+- analyze_study_room: 基于IoT数据推荐最优楼层和时间段
+
+请先调用 query_iot_data 获取真实IoT数据，然后调用 analyze_study_room 生成推荐。
+最后输出简洁的分点自习推荐。"""
+
+REVISE_SYSTEM_PROMPT = """你是自习环境Agent，负责在多智能体协商中修订自习方案。
+你可以使用以下工具：
+- revise_study_room: 根据冲突信息修订自习方案
+
+请调用 revise_study_room 工具，传入当前方案和冲突信息，获取修订后的推荐。"""
+
 
 class StudyEnvAgent:
     name = "study_env"
@@ -11,67 +30,73 @@ class StudyEnvAgent:
         self.memory = AgentMemory("study_env")
 
     def analyze(self, student_id, want_hours=4.0):
-        """IoT数据分析 → 自习推荐"""
-        # 使用统一的数据查询函数
-        iot_records = query_iot_from_db()
+        """通过 Tool Calling 分析IoT数据并推荐自习方案"""
+        tools = get_study_env_tools()
+        executor = create_agent(tools, ANALYZE_SYSTEM_PROMPT)
 
-        context = "\n".join([
-            f"{r['floor']}楼 {r['hour']}点 | 人流量：{r['traffic']} | CO2：{r['co2']} | 温度：{r['temp']}"
-            for r in iot_records[:20]
-        ])
+        user_input = f"请查询自习室IoT数据，并为需要连续自习 {want_hours} 小时的学生推荐最优楼层和时间段。"
 
-        prompt = f"""
-你是自习室推荐官。
-自习室IoT实时数据：
-{context}
+        try:
+            recommendation = run_agent(executor, user_input)
+        except Exception as e:
+            logger.warning(f"StudyEnvAgent tool calling 失败，回退: {e}")
+            recommendation = llm(f"自习室IoT数据，需要自习{want_hours}小时，推荐最优楼层和时段")
 
-学生需要连续自习 {want_hours} 小时。
-请推荐**最优楼层、最佳时间段**，简洁分点。
-"""
-        recommendation = llm(prompt)
+        # 查询原始IoT数据用于结构化返回
+        from ..tools import query_iot_data
+        iot_raw = query_iot_data.invoke({})
 
-        # 环境评分：人流量低、CO2低 → 高分
-        best = None
-        max_env = 0
-        for r in iot_records:
-            env = 100 - (r["traffic"] * 0.5 + r["co2"] * 0.3)
-            if env > max_env:
-                max_env = env
-                best = r
+        # 简单解析 IoT 数据计算环境评分
+        best_floor = "3"
+        best_score = 0
+        for line in iot_raw.split("\n"):
+            if "楼" in line and "人流" in line:
+                try:
+                    parts = line.split("：")[1] if "：" in line else ""
+                    traffic_str = parts.split("人流")[1].split("，")[0].strip() if "人流" in parts else "50"
+                    co2_str = parts.split("CO2 ")[1].split("p")[0].strip() if "CO2 " in parts else "450"
+                    traffic = float(traffic_str)
+                    co2 = float(co2_str)
+                    env = 100 - (traffic * 0.5 + co2 * 0.3)
+                    floor = line.split("楼")[0].replace("-", "").strip()
+                    if env > best_score:
+                        best_score = env
+                        best_floor = floor
+                except (ValueError, IndexError):
+                    pass
 
-        # 记忆：保存推荐结果
-        self.memory.add_interaction("system", f"推荐{best['floor'] if best else '?'}楼，环境评分{max_env:.0f}")
+        self.memory.add_interaction("system", f"推荐{best_floor}楼，环境评分{best_score:.0f}")
 
         return {
             "agent": self.name,
             "options": [{
-                "floor": f"{best['floor']}楼" if best else "3楼",
+                "floor": f"{best_floor}楼",
                 "start": 14.0,
                 "end": 14.0 + want_hours,
-                "env_score": round(max_env, 1),
-                "crowd_index": round(best["traffic"] / 100, 2) if best else 0.3
+                "env_score": round(best_score, 1),
+                "crowd_index": 0.3
             }],
             "selected": 0,
             "narrative": recommendation,
-            "raw_iot": iot_records[:10]
+            "raw_iot": []
         }
 
     def revise(self, state, conflict):
-        """根据结构化冲突信息修订自习方案"""
-        conflict_type = conflict.get("type", "")
-        suggestion = conflict.get("suggestion", "请自行调整")
-        description = conflict.get("description", "")
+        """通过 Tool Calling 修订自习方案"""
+        tools = get_study_env_tools()
+        executor = create_agent(tools, REVISE_SYSTEM_PROMPT)
 
+        conflict_type = conflict.get("type", "")
+        description = conflict.get("description", "")
+        suggestion = conflict.get("suggestion", "")
+
+        # 确定性调整（保留原有逻辑）
         if conflict_type == "studyroom_close":
             if "options" in state and state["options"]:
                 state["options"][0]["end"] = 22.0
-            suggestion = "将自习结束时间调整到22:00，确保在自习室22:30关门前离开"
-
         elif conflict_type == "lights_out":
             if "options" in state and state["options"]:
                 state["options"][0]["end"] = 22.5
-            suggestion = "将自习结束时间调整到22:30，确保23:00熄灯前回到宿舍"
-
         elif conflict_type == "time_overflow":
             evidence = conflict.get("evidence", {})
             limit = evidence.get("limit", 12.0)
@@ -80,29 +105,25 @@ class StudyEnvAgent:
             if "options" in state and state["options"]:
                 start = state["options"][0].get("start", 14.0)
                 state["options"][0]["end"] = start + new_end_hours
-            suggestion = f"将自习时长缩短到 {new_end_hours:.1f}h"
-
         elif conflict_type == "too_short_study":
             if "options" in state and state["options"]:
                 start = state["options"][0].get("start", 14.0)
                 state["options"][0]["end"] = start + 2.0
-            suggestion = "将自习时长延长到至少2小时"
 
-        prompt = f"""
-你是自习环境Agent。在多智能体协商中发现了以下冲突：
+        user_input = (
+            f"当前自习推荐：\n{state.get('narrative', '')}\n\n"
+            f"冲突类型：{conflict_type}\n"
+            f"问题描述：{description}\n"
+            f"调整建议：{suggestion}\n\n"
+            f"请修订推荐方案。"
+        )
 
-冲突类型：{conflict_type}
-问题描述：{description}
-调整建议：{suggestion}
+        try:
+            revised = run_agent(executor, user_input)
+        except Exception as e:
+            logger.warning(f"StudyEnvAgent revise tool calling 失败，回退: {e}")
+            revised = llm(f"冲突：{conflict_type}，{description}。当前推荐：{state.get('narrative', '')}。请修订。")
 
-你当前的自习推荐：
-{state.get('narrative', '')}
-
-请根据冲突信息修订你的推荐方案。要求：
-1. 解决上述冲突
-2. 结合IoT数据给出最优替代方案
-3. 输出修订后的简洁分点推荐
-"""
-        state["narrative"] = llm(prompt)
+        state["narrative"] = revised
         self.memory.add_interaction("system", f"修订自习方案，冲突类型：{conflict_type}")
         return state

@@ -23,13 +23,24 @@ def _get_embedding_model():
     return _embedding_model
 
 def get_embedding(text: str):
+    # ---- Redis 缓存 ----
+    from .cache import cache_get, cache_set, _make_hash
+    cache_key = f"emb:{_make_hash(text)}"
+    cached_val = cache_get(cache_key)
+    if cached_val is not None:
+        return cached_val
+
     model = _get_embedding_model()
     if model is False:
         # 模型加载失败，返回零向量（降级处理）
         logger.warning("向量模型不可用，返回零向量")
         return [0.0] * 512
     emb = model.encode(text, normalize_embeddings=True)
-    return emb.tolist()
+    result = emb.tolist()
+
+    # 写缓存（embedding 是确定性的，长 TTL）
+    cache_set(cache_key, result, ttl=86400)
+    return result
 
 # ===================== 向量转字符串（给 PostgreSQL 使用）=====================
 def vector_to_str(emb):
@@ -81,6 +92,13 @@ class PGVectorStore:
         conn.close()
 
     def search(self, text, top_k=3):
+        # ---- Redis 缓存 ----
+        from .cache import cache_get, cache_set, _make_hash
+        cache_key = f"vsearch:{self.table}:{_make_hash(text, top_k)}"
+        cached_val = cache_get(cache_key)
+        if cached_val is not None:
+            return cached_val
+
         query_emb = get_embedding(text)
         query_str = vector_to_str(query_emb)
 
@@ -94,7 +112,11 @@ class PGVectorStore:
         """, (query_str, query_str, top_k))
         rows = cur.fetchall()
         conn.close()
-        return [{"text": r[0], "meta": r[1], "score": 1 - r[2]} for r in rows]
+        result = [{"text": r[0], "meta": r[1], "score": 1 - r[2]} for r in rows]
+
+        # 校规是静态数据，长 TTL
+        cache_set(cache_key, result, ttl=86400)
+        return result
 
     def count(self):
         conn = get_conn()

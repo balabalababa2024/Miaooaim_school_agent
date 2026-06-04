@@ -17,3 +17,12 @@ MYSQL_CONFIG = {
     "password": os.getenv("MYSQL_PASSWORD", "123456"),
     "database": os.getenv("MYSQL_DATABASE", "my_agent_db"),
 }
+
+# Redis 缓存配置
+REDIS_CONFIG = {
+    "host": os.getenv("REDIS_HOST", "127.0.0.1"),
+    "port": int(os.getenv("REDIS_PORT", "6379")),
+    "db": int(os.getenv("REDIS_DB", "0")),
+    "password": os.getenv("REDIS_PASSWORD") or None,
+    "decode_responses": True,
+}
