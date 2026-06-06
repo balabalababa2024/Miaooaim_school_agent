@@ -11,6 +11,7 @@ ANALYZE_SYSTEM_PROMPT = """你是校园消费规划师。
 - query_consumption: 查询学生的真实消费数据
 - analyze_budget_plan: 基于消费数据生成预算分配方案
 
+核心原则：学生的原始需求是最高优先级，数据仅作参考。
 请先调用 query_consumption 获取学生真实消费数据，然后调用 analyze_budget_plan 生成方案。
 最后输出简洁的分点预算建议。"""
 
@@ -29,12 +30,13 @@ class LogisticsAgent:
     def __init__(self):
         self.memory = AgentMemory("logistics")
 
-    def analyze(self, student_id, monthly_budget=1200.0):
-        """通过 Tool Calling 分析消费并生成预算方案"""
+    def analyze(self, student_id, monthly_budget=1200.0, user_request=""):
+        """通过 Tool Calling 分析消费并生成预算方案。user_request 为学生原始需求（最高优先级）。"""
         tools = get_logistics_tools()
         executor = create_agent(tools, ANALYZE_SYSTEM_PROMPT)
 
-        user_input = f"请查询学生 {student_id} 的消费数据，并生成月度预算 {monthly_budget} 元的分配方案。"
+        request_hint = f"\n\n【学生原始需求（最高优先级，必须严格遵守）】\n{user_request}" if user_request else ""
+        user_input = f"请查询学生 {student_id} 的消费数据，并生成月度预算 {monthly_budget} 元的分配方案。{request_hint}"
 
         try:
             advice = run_agent(executor, user_input)

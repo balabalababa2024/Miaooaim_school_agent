@@ -11,6 +11,7 @@ ANALYZE_SYSTEM_PROMPT = """你是专业学业规划师。
 - query_grades: 查询学生的真实成绩数据
 - analyze_study_plan: 基于成绩数据生成学习提升计划
 
+核心原则：学生的原始需求是最高优先级，数据仅作参考。
 请先调用 query_grades 获取学生真实成绩，然后调用 analyze_study_plan 生成计划。
 最后输出简洁的分点学习计划。"""
 
@@ -29,12 +30,13 @@ class AcademicAgent:
     def __init__(self):
         self.memory = AgentMemory("academic")
 
-    def analyze(self, student_id, daily_hours=4.0):
-        """通过 Tool Calling 分析成绩并生成学习计划"""
+    def analyze(self, student_id, daily_hours=4.0, user_request=""):
+        """通过 Tool Calling 分析成绩并生成学习计划。user_request 为学生原始需求（最高优先级）。"""
         tools = get_academic_tools()
         executor = create_agent(tools, ANALYZE_SYSTEM_PROMPT)
 
-        user_input = f"请查询学生 {student_id} 的成绩，并生成每日学习 {daily_hours} 小时的提升计划。"
+        request_hint = f"\n\n【学生原始需求（最高优先级，必须严格遵守）】\n{user_request}" if user_request else ""
+        user_input = f"请查询学生 {student_id} 的成绩，并生成每日学习 {daily_hours} 小时的提升计划。{request_hint}"
 
         try:
             plan = run_agent(executor, user_input)

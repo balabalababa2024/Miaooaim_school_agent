@@ -11,6 +11,7 @@ ANALYZE_SYSTEM_PROMPT = """你是自习室推荐官。
 - query_iot_data: 查询自习室IoT传感器数据（人流量、CO2、温度）
 - analyze_study_room: 基于IoT数据推荐最优楼层和时间段
 
+核心原则：学生的原始需求是最高优先级，数据仅作参考。
 请先调用 query_iot_data 获取真实IoT数据，然后调用 analyze_study_room 生成推荐。
 最后输出简洁的分点自习推荐。"""
 
@@ -29,12 +30,13 @@ class StudyEnvAgent:
     def __init__(self):
         self.memory = AgentMemory("study_env")
 
-    def analyze(self, student_id, want_hours=4.0):
-        """通过 Tool Calling 分析IoT数据并推荐自习方案"""
+    def analyze(self, student_id, want_hours=4.0, user_request=""):
+        """通过 Tool Calling 分析IoT数据并推荐自习方案。user_request 为学生原始需求（最高优先级）。"""
         tools = get_study_env_tools()
         executor = create_agent(tools, ANALYZE_SYSTEM_PROMPT)
 
-        user_input = f"请查询自习室IoT数据，并为需要连续自习 {want_hours} 小时的学生推荐最优楼层和时间段。"
+        request_hint = f"\n\n【学生原始需求（最高优先级，必须严格遵守）】\n{user_request}" if user_request else ""
+        user_input = f"请查询自习室IoT数据，并为需要连续自习 {want_hours} 小时的学生推荐最优楼层和时间段。{request_hint}"
 
         try:
             recommendation = run_agent(executor, user_input)

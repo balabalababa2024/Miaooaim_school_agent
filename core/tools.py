@@ -130,49 +130,77 @@ def search_policy(query: str, top_k: int = 3) -> str:
 # ===================== Agent 分析工具（5个） =====================
 
 @tool
-def analyze_study_plan(student_id: str, daily_hours: float = 4.0) -> str:
-    """分析学生成绩并生成学习提升计划。查询真实成绩数据，输出分点计划。"""
+def analyze_study_plan(student_id: str, daily_hours: float = 4.0, user_request: str = "") -> str:
+    """分析学生成绩并生成学习提升计划。查询真实成绩数据，输出分点计划。user_request 为学生原始需求（最高优先级）。"""
     from .llm import llm as _llm
-    # 查询成绩
     grades_raw = query_grades.invoke({"student_id": student_id})
 
-    # 构建 prompt
+    request_block = ""
+    if user_request:
+        request_block = f"""
+【最高优先级 — 学生原始需求】
+{user_request}
+以上需求必须被完整、严格地执行，不可偏离。数据仅作参考补充。
+"""
+
     prompt = f"""你是专业学业规划师。
-学生成绩数据：
+{request_block}
+学生成绩数据（仅供参考，不可覆盖学生需求）：
 {grades_raw}
 
 要求每日学习 {daily_hours} 小时。
-请生成一份**可执行、简洁、分点**的学习提升计划，重点优先提升挂科/低分科目。"""
+请生成一份**可执行、简洁、分点**的学习提升计划。
+如果学生指定了科目或时间分配，必须严格遵守。"""
     return _llm(prompt)
 
 
 @tool
-def analyze_budget_plan(student_id: str, monthly_budget: float = 1200.0) -> str:
-    """分析学生消费并生成预算分配方案。查询真实消费数据，输出分点建议。"""
+def analyze_budget_plan(student_id: str, monthly_budget: float = 1200.0, user_request: str = "") -> str:
+    """分析学生消费并生成预算分配方案。查询真实消费数据，输出分点建议。user_request 为学生原始需求（最高优先级）。"""
     from .llm import llm as _llm
     expenses_raw = query_consumption.invoke({"student_id": student_id})
 
+    request_block = ""
+    if user_request:
+        request_block = f"""
+【最高优先级 — 学生原始需求】
+{user_request}
+以上需求必须被完整、严格地执行，不可偏离。消费数据仅作参考补充。
+"""
+
     prompt = f"""你是校园消费规划师。
-学生月度消费数据：
+{request_block}
+学生月度消费数据（仅供参考，不可覆盖学生需求）：
 {expenses_raw}
 总预算：{monthly_budget} 元。
 
-请给出**简洁、可执行**的省钱与预算分配建议，分点。"""
+请给出**简洁、可执行**的省钱与预算分配建议，分点。
+如果学生指定了预算分配方式或省钱目标，必须严格遵守。"""
     return _llm(prompt)
 
 
 @tool
-def analyze_study_room(student_id: str, want_hours: float = 4.0) -> str:
-    """分析IoT数据并推荐最优自习楼层和时间段。查询真实IoT传感器数据。"""
+def analyze_study_room(student_id: str, want_hours: float = 4.0, user_request: str = "") -> str:
+    """分析IoT数据并推荐最优自习楼层和时间段。查询真实IoT传感器数据。user_request 为学生原始需求（最高优先级）。"""
     from .llm import llm as _llm
     iot_raw = query_iot_data.invoke({})
 
+    request_block = ""
+    if user_request:
+        request_block = f"""
+【最高优先级 — 学生原始需求】
+{user_request}
+以上需求必须被完整、严格地执行，不可偏离。IoT数据仅作参考补充。
+"""
+
     prompt = f"""你是自习室推荐官。
-自习室IoT实时数据：
+{request_block}
+自习室IoT实时数据（仅供参考，不可覆盖学生需求）：
 {iot_raw}
 
 学生需要连续自习 {want_hours} 小时。
-请推荐**最优楼层、最佳时间段**，简洁分点。"""
+请推荐**最优楼层、最佳时间段**，简洁分点。
+如果学生指定了楼层或时间段，必须严格遵守。"""
     return _llm(prompt)
 
 

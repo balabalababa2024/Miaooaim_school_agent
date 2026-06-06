@@ -39,9 +39,9 @@ class MasterAgent:
 
     def negotiate(self, student_id, daily_hours=4.0, budget=1000.0,
                   want_env=True, care_policy=True, intensity="normal",
-                  subjects=None, max_rounds=None):
+                  subjects=None, max_rounds=None, user_request=""):
         """
-        多轮博弈协商主流程。
+        多轮博弈协商主流程。user_request 为学生原始需求文本（最高优先级）。
 
         返回:
         {
@@ -61,9 +61,10 @@ class MasterAgent:
         round_logs = []
 
         # ========== 第1轮：各 Agent 独立提案（Tool Calling） ==========
-        acad_state = self.academic.analyze(student_id, daily_hours)
-        logi_state = self.logistics.analyze(student_id, budget)
-        env_state = self.study_env.analyze(student_id, daily_hours)
+        # 用户原始需求作为最高优先级传入各 Agent
+        acad_state = self.academic.analyze(student_id, daily_hours, user_request=user_request)
+        logi_state = self.logistics.analyze(student_id, budget, user_request=user_request)
+        env_state = self.study_env.analyze(student_id, daily_hours, user_request=user_request)
         policy_state = self.policy.analyze()
 
         for round_num in range(1, max_rounds + 1):
@@ -165,6 +166,156 @@ class MasterAgent:
             "total_rounds": len(round_logs),
             "final_plan": final_report
         }
+
+    def negotiate_stream(self, student_id, daily_hours=4.0, budget=1000.0,
+                         want_env=True, care_policy=True, intensity="normal",
+                         subjects=None, max_rounds=None, user_request=""):
+        """多轮博弈协商主流程（SSE 流式版本）。通过 yield 输出结构化事件。"""
+        if max_rounds is None:
+            max_rounds = self.MAX_ROUNDS
+
+        round_logs = []
+
+        # ========== 第1轮：各 Agent 独立提案 ==========
+        agents_to_run = [
+            ("academic", self.academic, {"student_id": student_id, "daily_hours": daily_hours, "user_request": user_request}),
+            ("logistics", self.logistics, {"student_id": student_id, "monthly_budget": budget, "user_request": user_request}),
+            ("study_env", self.study_env, {"student_id": student_id, "want_hours": daily_hours, "user_request": user_request}),
+            ("policy", self.policy, {}),
+        ]
+
+        states = {}
+        for agent_name, agent_obj, kwargs in agents_to_run:
+            yield {"event": "agent_start", "data": {
+                "agent": agent_name, "label": agent_obj.display
+            }}
+            if agent_name == "policy":
+                states[agent_name] = agent_obj.analyze()
+            else:
+                states[agent_name] = agent_obj.analyze(**kwargs)
+            state = states[agent_name]
+            summary = ""
+            if agent_name == "academic":
+                opt = state.get("options", [{}])[0] if state.get("options") else {}
+                summary = f"每日{opt.get('daily_hours', 0)}h，风险分{state.get('risk_score', 0)}，弱项：{', '.join(state.get('weak_subjects', [])) or '无'}"
+            elif agent_name == "logistics":
+                summary = f"预算{state.get('monthly_budget', 0)}元，已花{state.get('total_spent', 0):.0f}元，日均餐费上限{state.get('daily_meal_cap', 0)}元"
+            elif agent_name == "study_env":
+                opt = state.get("options", [{}])[0] if state.get("options") else {}
+                summary = f"{opt.get('floor', '')} {opt.get('start', 0):.0f}:00-{opt.get('end', 0):.0f}:00，环境评分{opt.get('env_score', 0)}"
+            elif agent_name == "policy":
+                summary = state.get("narrative", "")[:100] or "校规约束已加载"
+            yield {"event": "agent_complete", "data": {
+                "agent": agent_name, "label": agent_obj.display, "summary": summary
+            }}
+
+        acad_state = states["academic"]
+        logi_state = states["logistics"]
+        env_state = states["study_env"]
+        policy_state = states["policy"]
+
+        for round_num in range(1, max_rounds + 1):
+            stage = "独立提案" if round_num == 1 else "协商修订"
+            yield {"event": "round_start", "data": {"round": round_num, "stage": stage}}
+
+            proposals = self._snapshot_proposals(acad_state, env_state, logi_state, policy_state)
+            yield {"event": "proposals", "data": proposals}
+
+            conflicts = self.policy.validate(acad_state, logi_state, env_state)
+
+            if not conflicts:
+                yield {"event": "round_complete", "data": {
+                    "round": round_num, "stage": "共识达成" if round_num > 1 else stage,
+                    "conflicts": 0, "resolutions": 0
+                }}
+                round_logs.append({
+                    "round": round_num,
+                    "stage": "共识达成" if round_num > 1 else "独立提案",
+                    "proposals": proposals, "conflicts": [], "resolutions": [],
+                    "agent_rationale": {}
+                })
+                break
+
+            formatted_conflicts = [self._format_conflict(c) for c in conflicts]
+            yield {"event": "conflicts", "data": formatted_conflicts}
+
+            resolutions = []
+            rationale = {}
+
+            for conflict in conflicts:
+                affected = conflict.get("between", [])
+                for agent_name in affected:
+                    yield {"event": "revision_start", "data": {
+                        "agent": agent_name, "conflict_type": conflict["type"]
+                    }}
+
+                    if agent_name == "academic":
+                        before_hours = acad_state["options"][0].get("daily_hours", 0) if acad_state.get("options") else 0
+                        acad_state = self.academic.revise(acad_state, conflict)
+                        after_hours = acad_state["options"][0].get("daily_hours", 0) if acad_state.get("options") else 0
+                        res = {"conflict_type": conflict["type"], "agent": "academic",
+                               "action": conflict.get("suggestion", "调整学习计划"),
+                               "before": {"daily_hours": before_hours}, "after": {"daily_hours": after_hours}}
+                        resolutions.append(res)
+                        rationale["academic"] = f"针对「{conflict['type']}」冲突调整了学习方案"
+                    elif agent_name == "study_env":
+                        before_end = env_state["options"][0].get("end", 0) if env_state.get("options") else 0
+                        env_state = self.study_env.revise(env_state, conflict)
+                        after_end = env_state["options"][0].get("end", 0) if env_state.get("options") else 0
+                        res = {"conflict_type": conflict["type"], "agent": "study_env",
+                               "action": conflict.get("suggestion", "调整自习方案"),
+                               "before": {"end": before_end}, "after": {"end": after_end}}
+                        resolutions.append(res)
+                        rationale["study_env"] = f"针对「{conflict['type']}」冲突调整了自习时段"
+                    elif agent_name == "logistics":
+                        before_cap = logi_state.get("daily_meal_cap", 0)
+                        logi_state = self.logistics.revise(logi_state, conflict)
+                        after_cap = logi_state.get("daily_meal_cap", 0)
+                        res = {"conflict_type": conflict["type"], "agent": "logistics",
+                               "action": conflict.get("suggestion", "调整预算方案"),
+                               "before": {"daily_meal_cap": before_cap}, "after": {"daily_meal_cap": after_cap}}
+                        resolutions.append(res)
+                        rationale["logistics"] = f"针对「{conflict['type']}」冲突调整了消费预算"
+
+                    yield {"event": "revision_complete", "data": {
+                        "agent": agent_name, "conflict_type": conflict["type"],
+                        "before": res["before"], "after": res["after"]
+                    }}
+
+            round_logs.append({
+                "round": round_num, "stage": stage,
+                "proposals": proposals,
+                "conflicts": formatted_conflicts,
+                "resolutions": resolutions,
+                "agent_rationale": rationale
+            })
+            yield {"event": "round_complete", "data": {
+                "round": round_num, "stage": stage,
+                "conflicts": len(conflicts), "resolutions": len(resolutions)
+            }}
+
+        consensus = len(round_logs) > 0 and len(round_logs[-1].get("conflicts", [])) == 0
+        yield {"event": "consensus", "data": {"consensus": consensus, "total_rounds": len(round_logs)}}
+
+        # 生成最终报告
+        yield {"event": "report_start", "data": {}}
+        final_report = self._generate_final_report(
+            student_id, acad_state, logi_state, env_state, policy_state, round_logs, consensus
+        )
+        yield {"event": "report_complete", "data": {"summary": final_report[:200]}}
+        self._save_plan_history(student_id, final_report, round_logs)
+
+        # 最终完整结果
+        yield {"event": "plan", "data": {
+            "rounds": round_logs,
+            "academic": acad_state,
+            "logistics": logi_state,
+            "study_env": env_state,
+            "policy": policy_state,
+            "consensus": consensus,
+            "total_rounds": len(round_logs),
+            "final_plan": final_report
+        }}
 
     def _snapshot_proposals(self, acad, env, logi, policy):
         """快照各 Agent 当前方案的核心数据"""

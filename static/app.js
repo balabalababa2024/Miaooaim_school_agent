@@ -189,7 +189,9 @@ const SEVERITY_COLORS = {
     LOW:  "var(--mut)"
 };
 
-// ==================== 生成规划（核心） ====================
+// ==================== 生成规划（SSE 流式） ====================
+let _currentRound = 0;
+
 document.getElementById('runBtn').onclick=async()=>{
     let req=document.getElementById('reqInput').value;
     if(!req){alert('请输入需求');return;}
@@ -197,34 +199,254 @@ document.getElementById('runBtn').onclick=async()=>{
     let btn = document.getElementById('runBtn');
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner"></span>多智能体协商中…';
+    _currentRound = 0;
 
     // 清空旧结果
     document.getElementById('flow').innerHTML = '';
     document.getElementById('flowEmpty').classList.add('hidden');
     document.getElementById('flow').classList.remove('hidden');
     document.getElementById('resultArea').classList.add('hidden');
+    document.getElementById('progressWrap').classList.remove('hidden');
+    document.getElementById('progressFill').style.width = '0%';
+    document.getElementById('progressLabel').textContent = '准备中…';
 
     try{
-        let r=await fetch('/api/plan',{
+        let r = await fetch('/api/plan/stream',{
             method:'POST',
             headers:{'Content-Type':'application/json'},
             body:JSON.stringify({request:req})
         });
-        let j=await r.json();
 
-        if(j.code!==0){
-            alert(j.msg || '规划生成失败');
+        if(!r.ok){
+            let j = await r.json();
+            alert(j.msg || j.data?.msg || '规划生成失败');
             return;
         }
 
-        renderNegotiation(j.data);
+        const reader = r.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while(true){
+            const {done, value} = await reader.read();
+            if(done) break;
+            buffer += decoder.decode(value, {stream: true});
+
+            // 按 \n\n 分割 SSE 事件
+            let parts = buffer.split('\n\n');
+            buffer = parts.pop(); // 保留未完成的部分
+
+            for(let part of parts){
+                if(!part.trim()) continue;
+                let eventType = '';
+                let dataStr = '';
+                for(let line of part.split('\n')){
+                    if(line.startsWith('event: ')) eventType = line.slice(7);
+                    if(line.startsWith('data: ')) dataStr = line.slice(6);
+                }
+                if(eventType && dataStr){
+                    try{
+                        let data = JSON.parse(dataStr);
+                        handleSSEEvent(eventType, data);
+                    }catch(e){
+                        console.warn('SSE JSON parse error:', e, dataStr);
+                    }
+                }
+            }
+        }
     }catch(e){
         alert('请求失败: ' + e.message);
     }finally{
         btn.disabled = false;
         btn.innerHTML = '🚀 启动多智能体博弈规划';
+        document.getElementById('progressWrap').classList.add('hidden');
     }
 };
+
+// ==================== SSE 进度追踪 ====================
+const PROGRESS_MAP = {
+    'cot':              {pct: 10, label: '需求拆解完成'},
+    'agent_start':      {pct: 15, label: 'Agent 分析中…'},
+    'agent_complete':   {pct: 30, label: 'Agent 分析完成'},
+    'round_start':      {pct: 35, label: '协商进行中…'},
+    'proposals':        {pct: 40, label: '提案已生成'},
+    'conflicts':        {pct: 50, label: '冲突检测完成'},
+    'revision_start':   {pct: 55, label: '方案调整中…'},
+    'revision_complete':{pct: 65, label: '方案调整完成'},
+    'round_complete':   {pct: 70, label: '本轮协商完成'},
+    'consensus':        {pct: 75, label: '共识判定完成'},
+    'report_start':     {pct: 80, label: '生成综合方案…'},
+    'report_complete':  {pct: 90, label: '综合方案生成完成'},
+    'plan':             {pct: 100, label: '规划完成'}
+};
+
+function updateProgress(event){
+    let info = PROGRESS_MAP[event];
+    if(!info) return;
+    document.getElementById('progressFill').style.width = info.pct + '%';
+    document.getElementById('progressLabel').textContent = info.label;
+}
+
+// ==================== SSE 事件处理（逐条渲染） ====================
+function handleSSEEvent(event, data){
+    let flow = document.getElementById('flow');
+    updateProgress(event);
+
+    switch(event){
+        case 'cot':
+            flow.innerHTML += renderCoT(data);
+            break;
+
+        case 'agent_start':
+            flow.innerHTML += `<div class="round" id="agent-${data.agent}">
+                <div class="round-head">
+                    <span>${AGENT_META[data.agent]?.icon || '⚪'} <b>${data.label}</b></span>
+                    <span style="font-size:12px;color:var(--warn)">⏳ 分析中…</span>
+                </div>
+                <div class="round-body" id="agent-body-${data.agent}">
+                    <span class="spinner" style="display:inline-block;width:16px;height:16px;border-width:2px"></span>
+                </div>
+            </div>`;
+            break;
+
+        case 'agent_complete': {
+            let el = document.getElementById(`agent-body-${data.agent}`);
+            if(el){
+                el.innerHTML = `<div style="font-size:12px;color:var(--mut)">${data.summary}</div>`;
+            }
+            let head = document.querySelector(`#agent-${data.agent} .round-head span:last-child`);
+            if(head) head.outerHTML = '<span style="font-size:12px;color:var(--ok)">✅ 完成</span>';
+            break;
+        }
+
+        case 'round_start':
+            _currentRound = data.round;
+            flow.innerHTML += `<div class="round" id="round-${data.round}">
+                <div class="round-head">
+                    <span>🔄 第${data.round}轮：${data.stage}</span>
+                    <span style="font-size:12px;color:var(--mut)" id="round-status-${data.round}">进行中…</span>
+                </div>
+                <div class="round-body" id="round-body-${data.round}"></div>
+            </div>`;
+            break;
+
+        case 'proposals': {
+            let body = document.getElementById(`round-body-${_currentRound}`);
+            if(!body) break;
+            let html = '<div class="snap">';
+            for(let [agent, info] of Object.entries(data)){
+                let meta = AGENT_META[agent] || {icon:"⚪", label:agent, color:"var(--mut)"};
+                let detail = formatProposalDetail(agent, info);
+                html += `<div class="pill" style="border-left:3px solid ${meta.color}">
+                    <span>${meta.icon} <b>${meta.label}</b></span><br>
+                    <span style="font-size:11px;color:var(--mut)">${detail}</span>
+                </div>`;
+            }
+            html += '</div>';
+            body.innerHTML += html;
+            break;
+        }
+
+        case 'conflicts': {
+            let body = document.getElementById(`round-body-${_currentRound}`);
+            if(!body) break;
+            let html = '';
+            data.forEach(c => {
+                let sevColor = SEVERITY_COLORS[c.severity] || 'var(--mut)';
+                let agents = (c.between||[]).map(a=>(AGENT_META[a]||{}).label||a).join(' ↔ ');
+                html += `<div class="conf">
+                    <span class="tag" style="background:${sevColor}">${c.severity}</span>
+                    <b>${c.type}</b>：${c.description}
+                    <div style="margin-top:4px;font-size:11px;color:var(--mut)">涉及：${agents}</div>
+                </div>`;
+            });
+            body.innerHTML += html;
+            let status = document.getElementById(`round-status-${_currentRound}`);
+            if(status) status.innerHTML = `⚠️ 发现${data.length}个冲突`;
+            break;
+        }
+
+        case 'revision_start': {
+            let body = document.getElementById(`round-body-${_currentRound}`);
+            if(!body) break;
+            let meta = AGENT_META[data.agent] || {icon:"⚪", label:data.agent};
+            body.innerHTML += `<div class="act" id="rev-${data.agent}-${data.conflict_type}">
+                ⏳ <b>${meta.label}</b> 正在调整…
+            </div>`;
+            break;
+        }
+
+        case 'revision_complete': {
+            let el = document.getElementById(`rev-${data.agent}-${data.conflict_type}`);
+            if(el){
+                let meta = AGENT_META[data.agent] || {icon:"⚪", label:data.agent};
+                el.className = 'act';
+                el.innerHTML = `✅ <b>${meta.label}</b>：针对「${data.conflict_type}」冲突已调整`;
+            }
+            break;
+        }
+
+        case 'round_complete': {
+            let status = document.getElementById(`round-status-${data.round}`);
+            if(status){
+                status.innerHTML = data.conflicts === 0
+                    ? '✅ 无冲突'
+                    : `✅ 已处理 ${data.conflicts} 个冲突`;
+            }
+            break;
+        }
+
+        case 'consensus':
+            flow.innerHTML += renderConsensusBanner(data.consensus, data.total_rounds);
+            break;
+
+        case 'report_start':
+            flow.innerHTML += `<div class="round" id="report-gen">
+                <div class="round-head">
+                    <span>📝 生成综合方案</span>
+                    <span style="font-size:12px;color:var(--warn)">⏳ 生成中…</span>
+                </div>
+                <div class="round-body">
+                    <span class="spinner" style="display:inline-block;width:16px;height:16px;border-width:2px"></span>
+                </div>
+            </div>`;
+            break;
+
+        case 'report_complete': {
+            let el = document.getElementById('report-gen');
+            if(el){
+                let head = el.querySelector('.round-head span:last-child');
+                if(head) head.outerHTML = '<span style="font-size:12px;color:var(--ok)">✅ 完成</span>';
+            }
+            break;
+        }
+
+        case 'plan':
+            // 最终完整结果 — 渲染最终方案
+            if(data.plan){
+                renderFinalPlan(data.plan);
+            } else if(data.final_plan){
+                renderFinalPlan({
+                    study: data.academic?.narrative || '',
+                    env: data.study_env?.narrative || '',
+                    consume: data.logistics?.saving_plan || '',
+                    policy: data.policy?.narrative || '',
+                    summary: data.final_plan
+                });
+            }
+            document.getElementById('progressWrap').classList.add('hidden');
+            break;
+
+        case 'error':
+            flow.innerHTML += `<div class="reuse-banner" style="border-color:var(--a)">
+                ❌ <b>错误</b>：${data.msg}
+            </div>`;
+            break;
+    }
+
+    // 滚动到底部
+    flow.scrollTop = flow.scrollHeight;
+}
 
 // ==================== 渲染协商全过程 ====================
 function renderNegotiation(data){

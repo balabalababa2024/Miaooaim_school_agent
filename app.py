@@ -1,8 +1,9 @@
 import os
+import json
 import logging
 import traceback
 from functools import wraps
-from flask import Flask, render_template, jsonify, request, session
+from flask import Flask, render_template, jsonify, request, session, Response
 from flask_sqlalchemy import SQLAlchemy
 from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime
@@ -430,6 +431,38 @@ def api_plan():
         "total_rounds": result.get("total_rounds", 0),
         "plan": result["final_plan"]
     }})
+
+
+# ====================== SSE 流式规划 ======================
+@app.route('/api/plan/stream', methods=['POST'])
+@require_login
+def api_plan_stream():
+    body, err = parse_body(PlanRequest)
+    if err:
+        return err
+
+    sid = session['student_id']
+    sv = Supervisor()
+
+    def generate():
+        try:
+            for evt in sv.plan_stream(sid, body.request):
+                event_name = evt.get("event", "message")
+                data = evt.get("data", {})
+                yield f"event: {event_name}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+        except Exception as e:
+            logger.error(f"SSE 流式规划异常: {e}\n{traceback.format_exc()}")
+            yield f"event: error\ndata: {json.dumps({'msg': str(e)}, ensure_ascii=False)}\n\n"
+
+    return Response(
+        generate(),
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'X-Accel-Buffering': 'no',
+            'Connection': 'keep-alive'
+        }
+    )
 
 
 # ====================== 调试 ======================

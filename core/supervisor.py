@@ -112,7 +112,8 @@ class Supervisor:
             want_env=want_env,
             care_policy=care_policy,
             intensity=intensity,
-            subjects=subjects
+            subjects=subjects,
+            user_request=request
         )
 
         # 提取协商结果
@@ -126,10 +127,13 @@ class Supervisor:
 
         # 存入经验库
         try:
+            from .database import get_embedding
+            emb = get_embedding(request)
             self.experience.add(
                 request,
                 meta={"final": final_report, "consensus": consensus,
-                       "rounds": len(rounds)}
+                       "rounds": len(rounds)},
+                embedding=emb
             )
         except Exception as e:
             print(f"[Supervisor] 保存经验失败: {e}")
@@ -151,6 +155,47 @@ class Supervisor:
             "summary": f"多智能体博弈协商完成，共{len(rounds)}轮，"
                        f"{'已达成共识' if consensus else '未完全达成共识'}"
         }
+
+    # ===================== SSE 流式规划入口 =====================
+    def plan_stream(self, student_id, request):
+        """SSE 流式版本的规划入口。通过 yield 输出结构化事件。"""
+        # 1. CoT 分解
+        cot = self.decompose(request)
+        yield {"event": "cot", "data": cot}
+
+        daily_hours = cot.get("daily_hours", 4.0)
+        budget = cot.get("budget", 1000.0)
+        intensity = cot.get("intensity", "normal")
+        subjects = cot.get("subjects", [])
+
+        # 2. 委派给 master.negotiate_stream()
+        result = None
+        for evt in self.master.negotiate_stream(
+            student_id=student_id,
+            daily_hours=daily_hours,
+            budget=budget,
+            intensity=intensity,
+            subjects=subjects,
+            user_request=request
+        ):
+            if evt["event"] == "plan":
+                result = evt["data"]
+            yield evt
+
+        # 3. 保存经验
+        if result:
+            try:
+                from .database import get_embedding
+                emb = get_embedding(request)
+                self.experience.add(
+                    request,
+                    meta={"final": result.get("final_plan", ""),
+                           "consensus": result.get("consensus", False),
+                           "rounds": result.get("total_rounds", 0)},
+                    embedding=emb
+                )
+            except Exception as e:
+                print(f"[Supervisor] 保存经验失败: {e}")
 
 
 def _now():
